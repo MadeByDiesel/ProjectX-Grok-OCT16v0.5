@@ -364,7 +364,7 @@ export class MNQDeltaTrendTrader {
 
     // ← ADD THESE 2 LINES HERE:
     this.enteredBarStartMs = this.barStartMs!;  // ← BLOCK RACE
-    this.calculator.captureAtrAtSignal(this.marketState.atr ?? 0);  // ← FREEZE ATR
+    // this.calculator.captureAtrAtSignal(this.marketState.atr ?? 0);  // ← FREEZE ATR
     // --- END OF FIX ---
 
     // Per-bar guard
@@ -381,7 +381,7 @@ export class MNQDeltaTrendTrader {
 
     try {
       const direction = signal.signal === 'buy' ? 'long' : 'short';
-      const atr = this.marketState.atr ?? 0;
+      const atr = Math.min(this.marketState.atr ?? 0, this.config.atrCap ?? 24);
 
       // Freeze ATR at signal time
       this.calculator.captureAtrAtSignal(atr);
@@ -494,11 +494,11 @@ export class MNQDeltaTrendTrader {
 
     // ← ADD THESE 2 LINES HERE:
     this.enteredBarStartMs = this.barStartMs!;  // ← BLOCK RACE
-    this.calculator.captureAtrAtSignal(this.marketState.atr ?? 0);  // ← FREEZE ATR
+    // this.calculator.captureAtrAtSignal(this.marketState.atr ?? 0);  // ← FREEZE ATR
     // --- END OF FIX ---
 
     const direction = signal.signal === 'buy' ? 'long' : 'short';
-    const atr = this.marketState.atr ?? 0;
+    const atr = Math.min(this.marketState.atr ?? 0, this.config.atrCap ?? 24);
 
     // --- Claim the bar BEFORE any await to block intra-bar thread ---
     const barId = this.barStartMs!;
