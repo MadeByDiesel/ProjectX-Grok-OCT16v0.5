@@ -381,7 +381,7 @@ export class MNQDeltaTrendTrader {
 
     try {
       const direction = signal.signal === 'buy' ? 'long' : 'short';
-      const atr = Math.min(this.marketState.atr ?? 0, this.config.atrCap ?? 24);
+      const atr = Math.min(this.marketState.atr ?? 0, this.config.atrCap ?? 16);
 
       // Freeze ATR at signal time
       this.calculator.captureAtrAtSignal(atr);
