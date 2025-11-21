@@ -385,7 +385,7 @@ export class MNQDeltaTrendCalculator {
 
     // EXHAUSTION PROTECTION
     const peakAbs = Math.max(...this.intraBarDeltaHistory.map(e => Math.abs(e.delta)), absDelta);
-    const fadeOk = peakAbs === 0 || absDelta >= peakAbs * 0.7;
+    const fadeOk = peakAbs === 0 || absDelta >= peakAbs * (this.config.deltaFadeRatio ?? 0.8);
 
     if (!fadeOk) {
       return { signal: 'hold', reason: `Fade: ${absDelta} < 70% of peak ${peakAbs}`, confidence: 0 };
