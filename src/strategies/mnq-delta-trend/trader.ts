@@ -498,7 +498,7 @@ export class MNQDeltaTrendTrader {
     // --- END OF FIX ---
 
     const direction = signal.signal === 'buy' ? 'long' : 'short';
-    const atr = Math.min(this.marketState.atr ?? 0, this.config.atrCap ?? 24);
+    const atr = Math.min(this.marketState.atr ?? 0, this.config.atrCap ?? 16);
 
     // --- Claim the bar BEFORE any await to block intra-bar thread ---
     const barId = this.barStartMs!;

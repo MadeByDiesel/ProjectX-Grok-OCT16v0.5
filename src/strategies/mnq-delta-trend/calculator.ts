@@ -209,7 +209,7 @@ export class MNQDeltaTrendCalculator {
 
   private determineTrend(): 'bullish' | 'bearish' | 'neutral' {
     if (this.bars15min.length < 2) return 'neutral';
-    const L = Math.max(1, this.config.htfEMALength ?? 50);
+    const L = Math.max(1, this.config.htfEMALength ?? 9);
     const useForming = this.config.htfUseForming === true;
     const lastIdx = useForming ? this.bars15min.length - 1 : this.bars15min.length - 2;
     if (lastIdx < 0) return 'neutral';
@@ -275,7 +275,7 @@ export class MNQDeltaTrendCalculator {
     }
 
     const atr = marketState.atr;
-    const atrThreshold = this.config.minAtrToTrade ?? 0;
+    const atrThreshold = this.config.minAtrToTrade ?? 9;
     if (!(Number.isFinite(atr) && atr > atrThreshold)) {
       return { signal: 'hold', reason: `ATR ${atr.toFixed(2)} ≤ ${atrThreshold}`, confidence: 0 };
     }
@@ -295,24 +295,28 @@ export class MNQDeltaTrendCalculator {
 
     const htf = marketState.higherTimeframeTrend;
 
+    // STRICT HTF ALIGNMENT REQUIRED – neutral is now BLOCKED
     if (passDeltaLong && htf === 'bullish' && brokeUpCloseTol) {
       if (this.config.useEmaFilter && !passLong) {
         return { signal: 'hold', reason: 'LTF EMA long filter not passed', confidence: 0 };
       }
       this.lastEntryBarTimestamp = bar.timestamp;
-      return { signal: 'buy', reason: `Δ=${delta} > spike & SMA×mult, bullish HTF`, confidence: 0.9 };
+      return { signal: 'buy', reason: `Δ=${delta} > spike & SMA×mult, strict bullish HTF`, confidence: 0.9 };
     }
-
     if (passDeltaShort && htf === 'bearish' && brokeDownCloseTol) {
       if (this.config.useEmaFilter && !passShort) {
         return { signal: 'hold', reason: 'LTF EMA short filter not passed', confidence: 0 };
       }
       this.lastEntryBarTimestamp = bar.timestamp;
-      return { signal: 'sell', reason: `Δ=${delta} < -spike & SMA×(-mult), bearish HTF`, confidence: 0.9 };
+      return { signal: 'sell', reason: `Δ=${delta} < -spike & SMA×(-mult), strict bearish HTF`, confidence: 0.9 };
+    }
+
+    // Explicitly block when HTF is neutral (this is the new protection)
+    if (htf === 'neutral') {
+      return { signal: 'hold', reason: 'HTF neutral – waiting for strict alignment', confidence: 0 };
     }
 
     return { signal: 'hold', reason: 'No signal', confidence: 0 };
-  }
 
   // === INTRA-BAR ===
   public evaluateFormingBar(
@@ -399,14 +403,19 @@ export class MNQDeltaTrendCalculator {
 
     const htf = marketState.higherTimeframeTrend;
 
+    // STRICT HTF ALIGNMENT REQUIRED – neutral is now BLOCKED
     if (passDeltaLong && htf === 'bullish' && brokeUpCloseTol) {
       if (this.config.useEmaFilter && !passLong) return { signal: 'hold', reason: 'EMA filter', confidence: 0 };
       return { signal: 'buy', reason: `[INTRA] Δ=${delta} (fadeOK, ${this.intraBarDeltaHistory.length} confirms)`, confidence: 0.85 };
     }
-
     if (passDeltaShort && htf === 'bearish' && brokeDownCloseTol) {
       if (this.config.useEmaFilter && !passShort) return { signal: 'hold', reason: 'EMA filter', confidence: 0 };
       return { signal: 'sell', reason: `[INTRA] Δ=${delta} (fadeOK, ${this.intraBarDeltaHistory.length} confirms)`, confidence: 0.85 };
+    }
+
+    // Explicitly block when HTF is neutral
+    if (htf === 'neutral') {
+      return { signal: 'hold', reason: 'HTF neutral – waiting for strict alignment', confidence: 0 };
     }
 
     return { signal: 'hold', reason: 'No intra signal', confidence: 0 };
@@ -438,7 +447,7 @@ export class MNQDeltaTrendCalculator {
 
   public setPosition(entryPrice: number, direction: 'long' | 'short', atrForTrail?: number): void {
     const atrSeed = (typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal;
-    const slDist = atrSeed * (this.config.atrStopLossMultiplier ?? 1.0);
+    const slDist = atrSeed * (this.config.atrStopLossMultiplier ?? 0.75);
     const stopLoss = direction === 'long' ? entryPrice - slDist : entryPrice + slDist;
 
     this.currentPosition = { entryPrice, entryTime: Date.now(), direction, stopLoss, atrSeed };
@@ -462,8 +471,8 @@ export class MNQDeltaTrendCalculator {
     if (Date.now() < this.noTrailBeforeMs) return 'none';
     if (!Number.isFinite(atrSeed) || atrSeed <= 0) return 'none';
 
-    const act = atrSeed * (this.config.trailActivationATR ?? 1.5);
-    const off = atrSeed * (this.config.trailOffsetATR ?? 1.0);
+    const act = atrSeed * (this.config.trailActivationATR ?? 0.125);
+    const off = atrSeed * (this.config.trailOffsetATR ?? 0.125);
 
     if (dir === 'long') {
       if (!this.trailArmed && (lastPrice - entryPrice) >= act) {
@@ -492,7 +501,7 @@ export class MNQDeltaTrendCalculator {
   public calculatePositionSize(currentPrice: number, atr: number, accountBalance: number): number {
     void currentPrice;
     const riskAmount = accountBalance * 0.01;
-    const riskPerContract = atr * (this.config.atrStopLossMultiplier ?? 1);
+    const riskPerContract = atr * (this.config.atrStopLossMultiplier ?? 0.75);
     if (!Number.isFinite(riskPerContract) || riskPerContract <= 0) return 1;
     const size = Math.floor(riskAmount / riskPerContract);
     return Math.min(Math.max(1, size), this.config.contractQuantity ?? 1);
