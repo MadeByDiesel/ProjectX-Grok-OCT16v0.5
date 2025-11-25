@@ -362,20 +362,16 @@ export class MNQDeltaTrendTrader {
     if (this.isFlattening) return;
     if (this.reconciling) return; // single-writer guard
 
-    // ← ADD THESE 2 LINES HERE:
-    this.enteredBarStartMs = this.barStartMs!;  // ← BLOCK RACE
-    // this.calculator.captureAtrAtSignal(this.marketState.atr ?? 0);  // ← FREEZE ATR
-    // --- END OF FIX ---
+    const barId = this.barStartMs!;
 
-    // Per-bar guard
+    // Check BEFORE setting flag
     if (this.enteredBarStartMs === this.barStartMs) {
       console.debug('[MNQDeltaTrend][INTRA-BAR] Already entered this bar, skipping');
       return;
     }
 
-    // --- Claim the bar BEFORE any await to block bar-close path ---
-    const barId = this.barStartMs!;
     this.enteredBarStartMs = barId;
+
     this.isEnteringPosition = true;
     this.reconciling = true;
 
@@ -492,17 +488,12 @@ export class MNQDeltaTrendTrader {
       return;
     }
 
-    // ← ADD THESE 2 LINES HERE:
-    this.enteredBarStartMs = this.barStartMs!;  // ← BLOCK RACE
-    // this.calculator.captureAtrAtSignal(this.marketState.atr ?? 0);  // ← FREEZE ATR
-    // --- END OF FIX ---
-
+    const barId = this.barStartMs!;
+    
+    this.enteredBarStartMs = barId;
     const direction = signal.signal === 'buy' ? 'long' : 'short';
     const atr = Math.min(this.marketState.atr ?? 0, this.config.atrCap ?? 16);
 
-    // --- Claim the bar BEFORE any await to block intra-bar thread ---
-    const barId = this.barStartMs!;
-    this.enteredBarStartMs = barId;
     this.isEnteringPosition = true;
     this.reconciling = true;
 
@@ -525,6 +516,8 @@ export class MNQDeltaTrendTrader {
       try {
         (this.calculator as any).setPosition?.(bar.close, direction, atr);
       } catch {}
+      
+      this.calculator.resetIntraBarTracking();
 
       if (this.config.sendWebhook) {
         this.postWebhook(signal.signal === 'buy' ? 'BUY' : 'SELL', qty);

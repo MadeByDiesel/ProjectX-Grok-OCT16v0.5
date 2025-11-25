@@ -317,6 +317,7 @@ export class MNQDeltaTrendCalculator {
     }
 
     return { signal: 'hold', reason: 'No signal', confidence: 0 };
+  }
 
   // === INTRA-BAR ===
   public evaluateFormingBar(
@@ -387,19 +388,21 @@ export class MNQDeltaTrendCalculator {
     const longThreshold = deltaSMA * surgeMult;
     const shortThreshold = deltaSMA * -surgeMult;
 
-    // EXHAUSTION PROTECTION
-    const peakAbs = Math.max(...this.intraBarDeltaHistory.map(e => Math.abs(e.delta)), absDelta);
-    const fadeOk = peakAbs === 0 || absDelta >= peakAbs * (this.config.deltaFadeRatio ?? 0.8);
-
-    if (!fadeOk) {
-      return { signal: 'hold', reason: `Fade: ${absDelta} < 70% of peak ${peakAbs}`, confidence: 0 };
+    // EXHAUSTION PROTECTION — FIXED + TUNABLE
+    let fadeOk = true;
+    const lookback = this.config.exhaustionLookback ?? 3;
+    const multiplier = this.config.exhaustionMultiplier ?? 3.5;
+    if (this.intraBarDeltaHistory.length >= lookback) {
+      const recent = this.intraBarDeltaHistory.slice(-lookback);
+      const avgAbs = recent.reduce((sum, e) => sum + Math.abs(e.delta), 0) / lookback;
+      const lastAbs = Math.abs(this.intraBarDeltaHistory[this.intraBarDeltaHistory.length - 1].delta);
+      if (lastAbs > avgAbs * multiplier) {
+        fadeOk = false;
+        console.info(`[MNQDeltaTrend][EXHAUSTION BLOCK] last tick |δ|=${lastAbs} > ${multiplier}× recent avg (${avgAbs.toFixed(0)}) → intra-bar signal blocked`);
+      }
     }
-
-    const allConfirmLong = this.intraBarDeltaHistory.every(e => e.delta > spike && e.delta > longThreshold);
-    const allConfirmShort = this.intraBarDeltaHistory.every(e => e.delta < -spike && e.delta < shortThreshold);
-
-    const passDeltaLong = delta > spike && delta > longThreshold && allConfirmLong && fadeOk;
-    const passDeltaShort = delta < -spike && delta < shortThreshold && allConfirmShort && fadeOk;
+    const passDeltaLong = delta > spike && delta > longThreshold && fadeOk;
+    const passDeltaShort = delta < -spike && delta < shortThreshold && fadeOk;
 
     const htf = marketState.higherTimeframeTrend;
 
@@ -446,7 +449,7 @@ export class MNQDeltaTrendCalculator {
   }
 
   public setPosition(entryPrice: number, direction: 'long' | 'short', atrForTrail?: number): void {
-    const atrSeed = (typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal;
+        const atrSeed = Math.min((typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal, 16);
     const slDist = atrSeed * (this.config.atrStopLossMultiplier ?? 0.75);
     const stopLoss = direction === 'long' ? entryPrice - slDist : entryPrice + slDist;
 

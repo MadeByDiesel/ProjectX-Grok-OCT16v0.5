@@ -29,14 +29,17 @@ export const MNQ_DELTA_TREND_CONFIG: StrategyConfig = {
   minBarsBeforeExit: 0,
 
   // NEW (v0.5)
-  deltaFadeRatio: 0.80,   // exhaustion guard
-  atrCap: 16,             // points, cap ATR at entry
+  atrCap: 12,             // points, cap ATR at entry
   tickExitGraceMs: 0,  // time-based grace before trailing
 
   // === TRAILING STOP CONFIGURATION ===
   useTrailingStop: true,
   trailActivationATR: 0.125,
   trailOffsetATR: 0.125,
+  
+  // ... existing configs ...
+  exhaustionLookback: 3,
+  exhaustionMultiplier: 2.5, // 2.5 stricter like .80 4.0 for .70
 
   // === POSITION SIZING ===
   contractQuantity: 1,

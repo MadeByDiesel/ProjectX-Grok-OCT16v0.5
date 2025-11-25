@@ -48,9 +48,12 @@ export interface StrategyConfig {
   webhookUrl: string;       // destination URL (empty => disabled)
   webhookSecret?: string;
   webhookInterface?: string;
+
+  // New fields for exhaustion tuning
+  exhaustionLookback?: number;  // Default 3, recent ticks to average
+  exhaustionMultiplier?: number;  // Default 3.5, spike threshold
   
    // ---- Added for v0.5 ----
-  deltaFadeRatio?: number;       // e.g. 0.8
   atrCap?: number;               // e.g. 24
   tickExitGraceMs?: number;      // e.g. 2000
   
