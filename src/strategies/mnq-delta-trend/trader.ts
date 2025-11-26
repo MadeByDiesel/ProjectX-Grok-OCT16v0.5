@@ -377,7 +377,7 @@ export class MNQDeltaTrendTrader {
 
     try {
       const direction = signal.signal === 'buy' ? 'long' : 'short';
-      const atr = Math.min(this.marketState.atr ?? 0, this.config.atrCap ?? 16);
+      const atr = Math.min(this.marketState.atr ?? 0, this.config.atrCap ?? 12);
 
       // Freeze ATR at signal time
       this.calculator.captureAtrAtSignal(atr);
@@ -492,7 +492,7 @@ export class MNQDeltaTrendTrader {
     
     this.enteredBarStartMs = barId;
     const direction = signal.signal === 'buy' ? 'long' : 'short';
-    const atr = Math.min(this.marketState.atr ?? 0, this.config.atrCap ?? 16);
+    const atr = Math.min(this.marketState.atr ?? 0, this.config.atrCap ?? 12);
 
     this.isEnteringPosition = true;
     this.reconciling = true;

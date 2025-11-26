@@ -50,8 +50,8 @@ export interface StrategyConfig {
   webhookInterface?: string;
 
   // New fields for exhaustion tuning
-  exhaustionLookback?: number;  // Default 3, recent ticks to average
-  exhaustionMultiplier?: number;  // Default 3.5, spike threshold
+  fadeLookback?: number;  // Default 3, recent ticks to average
+  deltaFadeRatio?: number;
   
    // ---- Added for v0.5 ----
   atrCap?: number;               // e.g. 24

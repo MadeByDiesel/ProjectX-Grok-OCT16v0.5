@@ -38,8 +38,8 @@ export const MNQ_DELTA_TREND_CONFIG: StrategyConfig = {
   trailOffsetATR: 0.125,
   
   // ... existing configs ...
-  exhaustionLookback: 3,
-  exhaustionMultiplier: 2.5, // 2.5 stricter like .80 4.0 for .70
+  fadeLookback: 3,
+  deltaFadeRatio: 0.85,
 
   // === POSITION SIZING ===
   contractQuantity: 1,

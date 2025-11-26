@@ -56,6 +56,30 @@ export class MNQDeltaTrendCalculator {
     return this.config;
   }
 
+  private isInTradingSession(timestamp: string): boolean {
+    try {
+      const tz = 'America/New_York';
+      const barTime = new Date(timestamp);
+      const options: Intl.DateTimeFormatOptions = { 
+        hour: '2-digit', 
+        minute: '2-digit', 
+        hour12: false, 
+        timeZone: tz 
+      };
+      const hhmm = new Intl.DateTimeFormat('en-US', options).format(barTime);
+      const [h, m] = hhmm.split(':').map(n => parseInt(n, 10));
+      const currentMinutes = h * 60 + m;
+      const [sh, sm] = (this.config.tradingStartTime ?? '09:30').split(':').map(n => parseInt(n, 10));
+      const [eh, em] = (this.config.tradingEndTime ?? '15:45').split(':').map(n => parseInt(n, 10));
+      const startMinutes = sh * 60 + sm;
+      const endMinutes = eh * 60 + em;
+      return currentMinutes >= startMinutes && currentMinutes <= endMinutes;
+    } catch (err) {
+      console.warn('[MNQDeltaTrend][SessionGate] error:', err);
+      return false; // Fail closed
+    }
+  }
+
   // === WARMUP ===
   processWarmUpBar(bar: BarData, timeframe: '3min' | 'HTF'): void {
     const arr = timeframe === '3min' ? this.bars3min : this.bars15min;
@@ -91,23 +115,9 @@ export class MNQDeltaTrendCalculator {
       return { signal: 'hold', reason: 'Warm-up in progress', confidence: 0 };
     }
 
-    // Session gate
-    try {
-      const tz = 'America/New_York';
-      const barTime = new Date(incoming.timestamp);
-      const options: Intl.DateTimeFormatOptions = { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: tz };
-      const hhmm = new Intl.DateTimeFormat('en-US', options).format(barTime);
-      const [h, m] = hhmm.split(':').map(n => parseInt(n, 10));
-      const currentMinutes = h * 60 + m;
-      const [sh, sm] = (this.config.tradingStartTime ?? '09:30').split(':').map(n => parseInt(n, 10));
-      const [eh, em] = (this.config.tradingEndTime ?? '15:55').split(':').map(n => parseInt(n, 10));
-      const startMinutes = sh * 60 + sm;
-      const endMinutes = eh * 60 + em;
-      if (currentMinutes < startMinutes || currentMinutes > endMinutes) {
-        return { signal: 'hold', reason: 'Out of session', confidence: 0 };
-      }
-    } catch (err) {
-      console.warn('[MNQDeltaTrend][SessionGate] failed to parse time:', err);
+    // Session gate check
+    if (!this.isInTradingSession(incoming.timestamp)) {
+      return { signal: 'hold', reason: 'Out of session', confidence: 0 };
     }
 
     const prevClose3m = this.bars3min.length ? this.bars3min[this.bars3min.length - 1].close : NaN;
@@ -328,6 +338,11 @@ export class MNQDeltaTrendCalculator {
     if (!this.isWarmUpProcessed) return { signal: 'hold', reason: 'Warm-up incomplete', confidence: 0 };
     if (this.hasPosition()) return { signal: 'hold', reason: 'Already in position', confidence: 0 };
 
+    // Session gate check for intra-bar entries
+    if (!this.isInTradingSession(formingBar.timestamp)) {
+      return { signal: 'hold', reason: 'Out of session (intra-bar)', confidence: 0 };
+    }
+
     const minAccumMs = this.config.intraBarMinAccumulationMs ?? 3000;
     if (accumulationTimeMs < minAccumMs) {
       return { signal: 'hold', reason: `Accum < ${minAccumMs}ms`, confidence: 0 };
@@ -388,19 +403,20 @@ export class MNQDeltaTrendCalculator {
     const longThreshold = deltaSMA * surgeMult;
     const shortThreshold = deltaSMA * -surgeMult;
 
-    // EXHAUSTION PROTECTION — FIXED + TUNABLE
+    // FADE PROTECTION — FIXED (blocks weak momentum for chop avoidance)
     let fadeOk = true;
-    const lookback = this.config.exhaustionLookback ?? 3;
-    const multiplier = this.config.exhaustionMultiplier ?? 3.5;
+    const lookback = this.config.fadeLookback ?? 3;
+    const fadeRatio = this.config.deltaFadeRatio ?? 0.8;
     if (this.intraBarDeltaHistory.length >= lookback) {
       const recent = this.intraBarDeltaHistory.slice(-lookback);
       const avgAbs = recent.reduce((sum, e) => sum + Math.abs(e.delta), 0) / lookback;
       const lastAbs = Math.abs(this.intraBarDeltaHistory[this.intraBarDeltaHistory.length - 1].delta);
-      if (lastAbs > avgAbs * multiplier) {
+      if (lastAbs < avgAbs * fadeRatio) {
         fadeOk = false;
-        console.info(`[MNQDeltaTrend][EXHAUSTION BLOCK] last tick |δ|=${lastAbs} > ${multiplier}× recent avg (${avgAbs.toFixed(0)}) → intra-bar signal blocked`);
+        console.info(`[MNQDeltaTrend][FADE BLOCK] last tick |δ|=${lastAbs} < ${fadeRatio}× recent avg (${avgAbs.toFixed(0)}) → intra-bar signal blocked`);
       }
     }
+    
     const passDeltaLong = delta > spike && delta > longThreshold && fadeOk;
     const passDeltaShort = delta < -spike && delta < shortThreshold && fadeOk;
 
@@ -449,7 +465,19 @@ export class MNQDeltaTrendCalculator {
   }
 
   public setPosition(entryPrice: number, direction: 'long' | 'short', atrForTrail?: number): void {
-        const atrSeed = Math.min((typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal, 16);
+    const configCap = Number(this.config.atrCap ?? 16);
+
+    // Use the last known HTF trend from the calculator's internal state
+    // (this is updated on every bar in processNewBar/evaluateFormingBar)
+    const lastKnownTrend = this.determineTrend();  // This method has access to bars15min
+
+    const effectiveCap = lastKnownTrend === 'neutral' ? 8 : configCap;
+
+    const atrSeed = Math.min(
+      (typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal,
+      effectiveCap
+    );
+
     const slDist = atrSeed * (this.config.atrStopLossMultiplier ?? 0.75);
     const stopLoss = direction === 'long' ? entryPrice - slDist : entryPrice + slDist;
 
