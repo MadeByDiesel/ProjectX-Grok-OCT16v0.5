@@ -465,7 +465,7 @@ export class MNQDeltaTrendCalculator {
   }
 
   public setPosition(entryPrice: number, direction: 'long' | 'short', atrForTrail?: number): void {
-    const configCap = Number(this.config.atrCap ?? 16);
+    const configCap = Number(this.config.atrCap ?? 12);
 
     // Use the last known HTF trend from the calculator's internal state
     // (this is updated on every bar in processNewBar/evaluateFormingBar)
