@@ -207,13 +207,18 @@ export class MNQDeltaTrendCalculator {
       return { passLong: true, passShort: true, lastClose, lastEma: NaN };
     }
     const L = Math.max(1, this.config.emaLength ?? 21);
-    const closes = this.bars3min.map(b => b.close);
-    if (closes.length < L) {
+    
+    // FIX: Exclude the current bar from EMA calculation
+    const closesForEma = this.bars3min.slice(0, -1).map(b => b.close);
+    
+    if (closesForEma.length < L) {
       return { passLong: false, passShort: false, lastClose: NaN, lastEma: NaN };
     }
-    const emaSeries = this.technical.calculateEMA(closes, L);
-    const lastClose = closes[closes.length - 1];
+    
+    const emaSeries = this.technical.calculateEMA(closesForEma, L);
+    const lastClose = this.bars3min[this.bars3min.length - 1].close;
     const lastEma = emaSeries[emaSeries.length - 1];
+    
     return { passLong: lastClose > lastEma, passShort: lastClose < lastEma, lastClose, lastEma };
   }
 
