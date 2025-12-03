@@ -410,8 +410,8 @@ export class MNQDeltaTrendCalculator {
 
     // FADE PROTECTION — FIXED (blocks weak momentum for chop avoidance)
     let fadeOk = true;
-    const lookback = this.config.fadeLookback ?? 3;
-    const fadeRatio = this.config.deltaFadeRatio ?? 0.8;
+    const lookback = this.config.fadeLookback ?? 5;
+    const fadeRatio = this.config.deltaFadeRatio ?? 0.7;
     if (this.intraBarDeltaHistory.length >= lookback) {
       const recent = this.intraBarDeltaHistory.slice(-lookback);
       const avgAbs = recent.reduce((sum, e) => sum + Math.abs(e.delta), 0) / lookback;

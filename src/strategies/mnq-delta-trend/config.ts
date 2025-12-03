@@ -38,8 +38,8 @@ export const MNQ_DELTA_TREND_CONFIG: StrategyConfig = {
   trailOffsetATR: 0.125,
   
   // ... existing configs ...
-  fadeLookback: 3,
-  deltaFadeRatio: 0.85,
+  fadeLookback: 5,
+  deltaFadeRatio: 0.70,
 
   // === POSITION SIZING ===
   contractQuantity: 1,
