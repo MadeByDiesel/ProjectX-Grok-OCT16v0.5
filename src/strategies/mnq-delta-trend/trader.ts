@@ -1,3 +1,4 @@
+// src/strategies/mnq-delta-trend/trader.ts
 import { ProjectXClient } from '../../services/projectx-client';
 import { MNQDeltaTrendCalculator } from './calculator';
 import { StrategyConfig } from './types';
@@ -43,7 +44,7 @@ export class MNQDeltaTrendTrader {
   // Single-writer reconcile lock for entry/exit/bar-close
   private reconciling = false;
 
-  // Minimal market state
+  // Minimal market state (ATR/HTF filled by calculator on bar-close; ATR used here only for snapshot)
   private marketState = {
     atr: 0,
     higherTimeframeTrend: 'neutral' as 'bullish' | 'bearish' | 'neutral',
@@ -52,7 +53,7 @@ export class MNQDeltaTrendTrader {
 
   private marketDataHandler = (q: GatewayQuote & { contractId: string }) => this.onQuote(q);
 
-  /** Post trade events to the local NT8 webhook listener */
+  /** Post trade events to local NT8 webhook listener (optional) */
   private async postWebhook(action: 'BUY' | 'SELL' | 'FLAT', qty?: number): Promise<void> {
     if (!this.config?.sendWebhook) return;
     const base = this.config.webhookUrl || '';
@@ -61,7 +62,7 @@ export class MNQDeltaTrendTrader {
     const secret = (this as any).config?.webhookSecret;
     const url = (!base.includes('?') && secret) ? `${base}?secret=${secret}` : base;
 
-    const payload: Record<string, any> = { symbol: 'MNQ', action };
+    const payload: Record<string, any> = { symbol: this.symbol || 'MNQ', action };
     if (action !== 'FLAT') payload.qty = Math.max(1, Number(qty ?? 1));
 
     const body = JSON.stringify(payload);
@@ -78,10 +79,7 @@ export class MNQDeltaTrendTrader {
       url
     ];
 
-    const opts: ExecFileOptionsWithStringEncoding = {
-      timeout: 4000,
-      encoding: 'utf8'
-    };
+    const opts: ExecFileOptionsWithStringEncoding = { timeout: 4000, encoding: 'utf8' };
 
     await new Promise<void>((resolve) => {
       execFile(
@@ -93,11 +91,8 @@ export class MNQDeltaTrendTrader {
             console.error('[webhook] curl error', error.message, stderr || '');
             return resolve();
           }
-          if (stdout?.trim()) {
-            console.info('[webhook] sent', payload, 'resp=', stdout.trim());
-          } else {
-            console.info('[webhook] sent', payload);
-          }
+          if (stdout?.trim()) console.info('[webhook] sent', payload, 'resp=', stdout.trim());
+          else console.info('[webhook] sent', payload);
           resolve();
         }
       );
@@ -131,8 +126,6 @@ export class MNQDeltaTrendTrader {
       if (!this.running) return;
       this.maybeCloseBarByClock();
     }, 1000);
-
-    console.info(`[MNQDeltaTrend][Trader] started for ${this.symbol} (contractId=${this.contractId})`);
   }
 
   public async stop(): Promise<void> {
@@ -145,71 +138,100 @@ export class MNQDeltaTrendTrader {
     console.info('[MNQDeltaTrend][Trader] stopped');
   }
 
-  private onQuote(quote: GatewayQuote & { contractId: string }): void {
+  private onQuote(q: GatewayQuote & { contractId: string }) {
     if (!this.running) return;
-    if (quote.contractId !== this.contractId) return;
+    if (q.contractId !== this.contractId) return;
 
-    const contractId = quote.contractId;
-    const px = quote.lastPrice;
+    const contractId = q.contractId;
+    const px = q.lastPrice;
     if (!Number.isFinite(px)) return;
 
-    if (!this.lastPriceByContract.has(contractId)) {
-      console.debug(`[MNQDeltaTrend][onQuote:first] ${this.symbol} px=${px}, vol=${quote.volume}`);
+    const nowMs = Date.now();
+
+    // === 3-minute bar bucketing (clock-based) ===
+    const bucketStart = Math.floor(nowMs / this.barStepMs) * this.barStepMs;
+
+    if (this.barStartMs === null) {
+      // First tick ever
+      this.barStartMs = bucketStart;
+      this.barOpenPx = px;
+      this.barHighPx = px;
+      this.barLowPx = px;
+      this.liveBarOpen = px;
+      this.liveBarHigh = px;
+      this.liveBarLow = px;
+      this.liveBarStartMs = nowMs;
+      this.volInBarByContract.set(contractId, 0);
+      this.signedVolInBarByContract.set(contractId, 0);
+    } else if (bucketStart > this.barStartMs) {
+      // New bucket → close prior, open new
+      this.closeBarAndProcess();
+
+      this.barStartMs = bucketStart;
+      this.barOpenPx = px;
+      this.barHighPx = px;
+      this.barLowPx = px;
+      this.liveBarOpen = px;
+      this.liveBarHigh = px;
+      this.liveBarLow = px;
+      this.liveBarStartMs = nowMs;
+      this.lastIntraBarCheckMs = 0;
+
+      this.enteredBarStartMs = null;
+      this.calculator.resetIntraBarTracking();
+      this.volInBarByContract.set(contractId, 0);
+      this.signedVolInBarByContract.set(contractId, 0);
+    } else {
+      // Update current bar extremes
+      this.barHighPx = Math.max(this.barHighPx!, px);
+      this.barLowPx = Math.min(this.barLowPx!, px);
+      this.liveBarHigh = Math.max(this.liveBarHigh!, px);
+      this.liveBarLow = Math.min(this.liveBarLow!, px);
     }
 
-    // Accumulate per-tick volume & signed volume
-    const cumVol = (quote as any).volume ?? 0;
+    // === Per-tick delta & volume accumulation (cumulative → delta) ===
     const prevPx = this.lastPriceByContract.get(contractId);
     const prevCum = this.lastCumVolByContract.get(contractId);
+    const cumVol = (q as any).volume ?? 0; // GatewayQuote 'volume' treated as cumulative
 
     let dVol = 0;
     if (typeof prevCum === 'number' && cumVol >= prevCum) dVol = cumVol - prevCum;
 
-    let signed = 0;
-    if (typeof prevPx === 'number') {
-      if (px > prevPx) signed = dVol;
-      else if (px < prevPx) signed = -dVol;
-      else signed = 0;
-    }
+    // Signed by tick direction
+    const signed = typeof prevPx === 'number'
+      ? (px > prevPx ? dVol : px < prevPx ? -dVol : 0)
+      : 0;
 
-    this.calculator.pushIntraBarDelta(signed, Date.now());
+    // Accumulate into forming bar totals
+    this.volInBarByContract.set(contractId, (this.volInBarByContract.get(contractId) ?? 0) + (Number.isFinite(dVol) ? dVol : 0));
+    this.signedVolInBarByContract.set(contractId, (this.signedVolInBarByContract.get(contractId) ?? 0) + (Number.isFinite(signed) ? signed : 0));
 
+    // Push **per-tick signed** delta into calculator’s intra-bar window
+    this.calculator.pushIntraBarDelta(signed, nowMs);
 
-    this.volInBarByContract.set(
-      contractId,
-      (this.volInBarByContract.get(contractId) ?? 0) + (Number.isFinite(dVol) ? dVol : 0)
-    );
-    this.signedVolInBarByContract.set(
-      contractId,
-      (this.signedVolInBarByContract.get(contractId) ?? 0) + (Number.isFinite(signed) ? signed : 0)
-    );
-
+    // Now update last refs
     this.lastPriceByContract.set(contractId, px);
     this.lastCumVolByContract.set(contractId, cumVol);
 
-    // Tick-level protective exits (stop/trail)
+    // === Tick-level protective exits (hard stop / trail) ===
     if (this.calculator.hasPosition() && !this.isFlattening) {
-      if (this.reconciling) return; // single-writer guard
+      if (this.reconciling) return;
       const hit = this.calculator.onTickForProtectiveStops(px, this.marketState.atr ?? 0);
       if (hit === 'hitStop' || hit === 'hitTrail') {
         const dir = this.calculator.getPositionDirection();
-        console.info(`[MNQDeltaTrend][EXIT] ${hit} (tick) { px: ${px}, atr: ${this.marketState.atr}, dir: ${dir} }`);
-
+        console.info(`[MNQDeltaTrend][EXIT] ${hit} (tick) px=${px} dir=${dir}`);
         this.reconciling = true;
         this.isFlattening = true;
         this.client.closePosition(this.contractId)
           .then(() => {
-            console.info('[MNQDeltaTrend][EXIT] flattened via closePosition');
+            console.info('[MNQDeltaTrend][EXIT] flattened');
             this.calculator.clearPosition();
-            this.calculator.clearCooldowns(); // cooldowns reset only post-flatten
+            this.calculator.clearCooldowns();
             this.isFlattening = false;
             this.reconciling = false;
-
-            if (this.config.sendWebhook) {
-              this.postWebhook('FLAT');
-            }
+            if (this.config.sendWebhook) void this.postWebhook('FLAT');
           })
-          .catch((err) => {
+          .catch(err => {
             console.error('[MNQDeltaTrend][EXIT] flatten failed:', err);
             this.isFlattening = false;
             this.reconciling = false;
@@ -217,60 +239,7 @@ export class MNQDeltaTrendTrader {
       }
     }
 
-    // 3-minute bar bucketing
-    const nowMs = Date.now();
-    const bucketStart = Math.floor(nowMs / this.barStepMs) * this.barStepMs;
-
-    // First tick ever or first tick of a new bucket
-    if (this.barStartMs === null) {
-      this.barStartMs = bucketStart;
-      this.barOpenPx = px;
-      this.barHighPx = px;
-      this.barLowPx = px;
-
-      this.liveBarOpen = px;
-      this.liveBarHigh = px;
-      this.liveBarLow = px;
-      this.liveBarStartMs = nowMs;
-
-      console.debug(`[MNQDeltaTrend][barOpen] ${new Date(this.barStartMs).toISOString()} O=${px}`);
-      return;
-    }
-
-    if (bucketStart > this.barStartMs) {
-      // Crossed into new bucket → close prior bar and open new one
-      this.closeBarAndProcess();
-
-      this.barStartMs = bucketStart;
-      this.barOpenPx = px;
-      this.barHighPx = px;
-      this.barLowPx = px;
-
-      // Reset live bar tracking for new bar
-      this.liveBarOpen = px;
-      this.liveBarHigh = px;
-      this.liveBarLow = px;
-      this.liveBarStartMs = nowMs;
-      this.lastIntraBarCheckMs = 0;
-
-      // Reset per-bar entry tracking
-      // (one-entry-per-bar rule persists across flatten within the same bar)
-      this.enteredBarStartMs = null;
-
-      // Reset calculator's intra-bar tracking
-      this.calculator.resetIntraBarTracking();
-
-      console.debug(`[MNQDeltaTrend][barOpen] ${new Date(this.barStartMs).toISOString()} O=${px}`);
-      return;
-    }
-
-    // Update current bar extremes
-    if (this.barHighPx !== null) this.barHighPx = Math.max(this.barHighPx, px);
-    if (this.barLowPx !== null) this.barLowPx = Math.min(this.barLowPx, px);
-    if (this.liveBarHigh !== null) this.liveBarHigh = Math.max(this.liveBarHigh, px);
-    if (this.liveBarLow !== null) this.liveBarLow = Math.min(this.liveBarLow, px);
-
-    // Intra-bar delta signal check
+    // === Intra-bar signal check ===
     if (this.config.useIntraBarDetection && !this.calculator.hasPosition() && !this.isFlattening) {
       const checkIntervalMs = this.config.intraBarCheckIntervalMs ?? 100;
       if ((nowMs - this.lastIntraBarCheckMs) >= checkIntervalMs) {
@@ -296,139 +265,55 @@ export class MNQDeltaTrendTrader {
       this.barOpenPx = lastPx!;
       this.barHighPx = lastPx!;
       this.barLowPx = lastPx!;
-
       this.liveBarOpen = lastPx!;
       this.liveBarHigh = lastPx!;
       this.liveBarLow = lastPx!;
       this.liveBarStartMs = nowMs;
       this.lastIntraBarCheckMs = 0;
-
-      // Reset per-bar entry tracking
       this.enteredBarStartMs = null;
-
       this.calculator.resetIntraBarTracking();
-
-      console.debug(`[MNQDeltaTrend][barOpen:HB] ${new Date(this.barStartMs).toISOString()} O=${lastPx}`);
+      this.volInBarByContract.set(this.contractId, 0);
+      this.signedVolInBarByContract.set(this.contractId, 0);
     }
   }
 
-  /**
-   * Check for intra-bar signal generation based on accumulating delta.
-   */
   private checkIntraBarSignal(currentPrice: number, nowMs: number): void {
-    if (!this.liveBarOpen || !this.liveBarHigh || !this.liveBarLow || !this.liveBarStartMs) return;
-    if (this.enteredBarStartMs === this.barStartMs) return;
+    if (this.barStartMs === null) return;
 
-    const accumulationTimeMs = nowMs - this.liveBarStartMs;
-
-    // Get current accumulated delta and volume
-    const currentDelta = this.signedVolInBarByContract.get(this.contractId) ?? 0;
-    const currentVolume = this.volInBarByContract.get(this.contractId) ?? 0;
-
-    // Build forming bar snapshot
     const formingBar: BarData = {
-      timestamp: new Date(this.barStartMs!).toISOString(),
-      open: this.liveBarOpen,
-      high: this.liveBarHigh,
-      low: this.liveBarLow,
+      timestamp: new Date(this.barStartMs + this.barStepMs - 1).toISOString(), // end-of-bucket timestamp for gate
+      open: this.liveBarOpen!,
+      high: this.liveBarHigh!,
+      low: this.liveBarLow!,
       close: currentPrice,
-      volume: currentVolume,
-      delta: currentDelta,
+      volume: this.volInBarByContract.get(this.contractId) ?? 0,
+      delta: this.signedVolInBarByContract.get(this.contractId) ?? 0,
     };
 
-    // Ask calculator to evaluate with safeguards
-    const signal = this.calculator.evaluateFormingBar(formingBar, this.marketState as any, accumulationTimeMs);
+    const accumulationMs = this.liveBarStartMs ? (nowMs - this.liveBarStartMs) : 0;
+    const signal = this.calculator.evaluateFormingBar(formingBar, this.marketState, accumulationMs);
 
-    // Only act on buy/sell signals
-    if (signal.signal === 'buy' || signal.signal === 'sell') {
-      console.info(
-        `[MNQDeltaTrend][INTRA-BAR SIGNAL] ${signal.signal.toUpperCase()}`,
-        `Δ=${currentDelta.toFixed(0)} px=${currentPrice.toFixed(2)}`,
-        `accumulated=${accumulationTimeMs}ms reason="${signal.reason}"`
-      );
+    if (signal.signal !== 'hold') {
+      // Route through unified handler (applies race guard + ATR snapshot + order)
       void this.executeIntraBarSignal(signal, formingBar);
     }
   }
 
-  /**
-   * Execute order from intra-bar signal.
-   */
   private async executeIntraBarSignal(
     signal: { signal: 'buy' | 'sell' | 'hold'; reason: string; confidence: number },
     bar: BarData
-  ): Promise<void> {
-    if (signal.signal === 'hold') return;
-    if (this.calculator.hasPosition()) return;
-    if (this.isFlattening) return;
-    if (this.reconciling) return; // single-writer guard
-
-    const barId = this.barStartMs!;
-
-    // Check BEFORE setting flag
-    if (this.enteredBarStartMs === this.barStartMs) {
-      console.debug('[MNQDeltaTrend][INTRA-BAR] Already entered this bar, skipping');
-      return;
-    }
-
-    this.enteredBarStartMs = barId;
-
-    this.isEnteringPosition = true;
-    this.reconciling = true;
-
-    try {
-      const direction = signal.signal === 'buy' ? 'long' : 'short';
-      const atr = Math.min(this.marketState.atr ?? 0, this.config.atrCap ?? 12);
-      // const htf = this.marketState.higherTimeframeTrend;
-      // const baseCap = htf === 'neutral' ? 8 : 10;
-      // const atr = Math.min(this.marketState.atr ?? 0, baseCap);
-
-      // Freeze ATR at signal time
-      this.calculator.captureAtrAtSignal(atr);
-
-      const acctBal = await this.client.getEquity();
-      const qty = Math.max(1, this.calculator.calculatePositionSize(bar.close, atr, acctBal));
-
-      console.info(
-        `[MNQDeltaTrend][INTRA-BAR ORDER] ${signal.signal.toUpperCase()} qty=${qty}`,
-        `confidence=${signal.confidence} bar=${new Date(barId).toISOString()}`
-      );
-
-      await this.client.createOrder({
-        contractId: this.contractId,
-        type: 2,
-        side: signal.signal === 'buy' ? 0 : 1,
-        size: qty,
-      });
-
-      try {
-        (this.calculator as any).setPosition?.(bar.close, direction, atr);
-      } catch (err) {
-        console.warn('[MNQDeltaTrend][INTRA-BAR] setPosition failed:', err);
-      }
-
-      if (this.config.sendWebhook) {
-        await this.postWebhook(signal.signal === 'buy' ? 'BUY' : 'SELL', qty);
-      }
-
-    } catch (err) {
-      console.error('[MNQDeltaTrend][INTRA-BAR ORDER] execution failed:', err);
-      // Roll back the claim if order failed so we can retry on this bar
-      this.enteredBarStartMs = (this.barStartMs === barId) ? null : this.enteredBarStartMs;
-    } finally {
-      this.isEnteringPosition = false;
-      this.reconciling = false;
-    }
+  ) {
+    await this.handleSignal(signal, bar);
   }
 
   private closeBarAndProcess(): void {
     if (this.barStartMs === null || this.barOpenPx === null || this.barHighPx === null || this.barLowPx === null) return;
 
-    const contractId = this.contractId;
-    const closePx = this.lastPriceByContract.get(contractId);
+    const closePx = this.lastPriceByContract.get(this.contractId);
     if (!Number.isFinite(closePx)) return;
 
-    const volume = Math.max(0, Math.floor(this.volInBarByContract.get(contractId) ?? 0));
-    const signed = Math.trunc(this.signedVolInBarByContract.get(contractId) ?? 0);
+    const volume = Math.max(0, Math.floor(this.volInBarByContract.get(this.contractId) ?? 0));
+    const signed = Math.trunc(this.signedVolInBarByContract.get(this.contractId) ?? 0);
 
     const barEndIso = new Date(this.barStartMs + this.barStepMs - 1).toISOString();
 
@@ -443,12 +328,14 @@ export class MNQDeltaTrendTrader {
     };
 
     // Reset accumulators for next bar
-    this.volInBarByContract.set(contractId, 0);
-    this.signedVolInBarByContract.set(contractId, 0);
+    this.volInBarByContract.set(this.contractId, 0);
+    this.signedVolInBarByContract.set(this.contractId, 0);
 
-    // Process bar-close signal (fallback if intra-bar didn't fire)
-    const signal = this.calculator.processNewBar(closedBar as any, this.marketState as any);
-    this.handleSignal(signal, closedBar);
+    // Process bar-close signal (fallback if intra-bar didn’t fire)
+    if (!this.reconciling) {
+      const signal = this.calculator.processNewBar(closedBar as any, this.marketState as any);
+      void this.handleSignal(signal, closedBar);
+    }
 
     console.debug(
       `[MNQDeltaTrend][barClose] t=${closedBar.timestamp} O:${closedBar.open} H:${closedBar.high} L:${closedBar.low} C:${closedBar.close} Δ:${closedBar.delta} V:${closedBar.volume}`
@@ -460,9 +347,12 @@ export class MNQDeltaTrendTrader {
   }
 
   private async handleSignal(
-    signal: { signal: 'buy' | 'sell' | 'hold'; reason: string; confidence: number },
+    signal: { signal: 'buy' | 'sell' | 'hold' | 'exit'; reason: string; confidence: number },
     bar: BarData
   ) {
+    // Ignore calculator’s optional 'exit' (we exit via tick-level SL/trail)
+    if (signal.signal === 'exit') return;
+
     if (signal.signal === 'hold') {
       console.debug('[MNQDeltaTrend][order] HOLD:', signal.reason);
       return;
@@ -472,13 +362,10 @@ export class MNQDeltaTrendTrader {
       console.debug('[MNQDeltaTrend][order] skipped: already in position');
       return;
     }
-
-    // Block if intra-bar path is currently entering or reconciling is active
     if (this.isEnteringPosition || this.reconciling) {
       console.debug('[MNQDeltaTrend][order] skipped: entry in flight / reconciling');
       return;
     }
-
     if (this.enteredBarStartMs === this.barStartMs) {
       console.debug('[MNQDeltaTrend][order] skipped: already entered this bar');
       return;
@@ -491,24 +378,22 @@ export class MNQDeltaTrendTrader {
       return;
     }
 
+    // --- CRITICAL RACE GUARD: claim bar BEFORE awaits to block the other path ---
     const barId = this.barStartMs!;
-    
     this.enteredBarStartMs = barId;
+
     const direction = signal.signal === 'buy' ? 'long' : 'short';
-    const atr = Math.min(this.marketState.atr ?? 0, this.config.atrCap ?? 12);
-    // const htf = this.marketState.higherTimeframeTrend;
-    // const baseCap = htf === 'neutral' ? 8 : 10;
-    // const atr = Math.min(this.marketState.atr ?? 0, baseCap);
+    const atrSnapshot = Math.min(atrNow, this.config.atrCap ?? 16); // enforce atrCap at snapshot
 
     this.isEnteringPosition = true;
     this.reconciling = true;
 
     try {
-      // Freeze ATR at signal time for bar-close path
-      this.calculator.captureAtrAtSignal(atr);
+      // Freeze ATR at signal for SL/trail math
+      this.calculator.captureAtrAtSignal(atrSnapshot);
 
       const acctBal = await this.client.getEquity();
-      const qty = Math.max(1, this.calculator.calculatePositionSize(bar.close, atr, acctBal));
+      const qty = Math.max(1, this.calculator.calculatePositionSize(bar.close, atrSnapshot, acctBal));
 
       console.info(`[MNQDeltaTrend][order] ${signal.signal.toUpperCase()} qty=${qty} reason="${signal.reason}"`);
 
@@ -520,18 +405,18 @@ export class MNQDeltaTrendTrader {
       });
 
       try {
-        (this.calculator as any).setPosition?.(bar.close, direction, atr);
-      } catch {}
-      
+        (this.calculator as any).setPosition?.(bar.close, direction, atrSnapshot);
+      } catch (err) {
+        console.warn('[MNQDeltaTrend] setPosition error:', err);
+      }
+
       this.calculator.resetIntraBarTracking();
 
-      if (this.config.sendWebhook) {
-        this.postWebhook(signal.signal === 'buy' ? 'BUY' : 'SELL', qty);
-      }
+      if (this.config.sendWebhook) void this.postWebhook(signal.signal === 'buy' ? 'BUY' : 'SELL', qty);
 
     } catch (err) {
       console.error('[MNQDeltaTrend][order] placement failed:', err);
-      // Roll back claim if order failed so bar-close/intrabar can retry
+      // Roll back claim if order failed so other path can retry on this bar
       this.enteredBarStartMs = (this.barStartMs === barId) ? null : this.enteredBarStartMs;
     } finally {
       this.isEnteringPosition = false;

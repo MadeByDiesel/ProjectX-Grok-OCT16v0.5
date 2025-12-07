@@ -1,3 +1,4 @@
+// calculator.ts — Exact code used on Nov 13, 2025 (the winning day)
 import { BarData, MarketState, StrategyConfig, TradeSignal } from './types';
 import { TechnicalCalculator } from '../../utils/technical';
 
@@ -33,7 +34,6 @@ export class MNQDeltaTrendCalculator {
   private lastIntraBarSignalTime = 0;
   private lastEntryBarTimestamp: string | null = null;
 
-    // === ADD THESE METHODS ===
   public pushIntraBarDelta(delta: number, timestamp: number): void {
     this.intraBarDeltaHistory.push({ delta, timestamp });
   }
@@ -41,7 +41,6 @@ export class MNQDeltaTrendCalculator {
   public getIntraBarDeltaHistory(): Array<{ delta: number; timestamp: number }> {
     return this.intraBarDeltaHistory;
   }
-  // === END ADD ===
 
   // ATR snapshot for entry
   private atrAtSignal: number = 0;
@@ -64,19 +63,18 @@ export class MNQDeltaTrendCalculator {
         hour: '2-digit', 
         minute: '2-digit', 
         hour12: false, 
-        timeZone: tz 
-      };
+        timeZone: tz };
       const hhmm = new Intl.DateTimeFormat('en-US', options).format(barTime);
       const [h, m] = hhmm.split(':').map(n => parseInt(n, 10));
       const currentMinutes = h * 60 + m;
       const [sh, sm] = (this.config.tradingStartTime ?? '09:30').split(':').map(n => parseInt(n, 10));
-      const [eh, em] = (this.config.tradingEndTime ?? '15:45').split(':').map(n => parseInt(n, 10));
+      const [eh, em] = (this.config.tradingEndTime ?? '15:55').split(':').map(n => parseInt(n, 10));
       const startMinutes = sh * 60 + sm;
       const endMinutes = eh * 60 + em;
       return currentMinutes >= startMinutes && currentMinutes <= endMinutes;
     } catch (err) {
       console.warn('[MNQDeltaTrend][SessionGate] error:', err);
-      return false; // Fail closed
+      return false;
     }
   }
 
@@ -115,7 +113,6 @@ export class MNQDeltaTrendCalculator {
       return { signal: 'hold', reason: 'Warm-up in progress', confidence: 0 };
     }
 
-    // Session gate check
     if (!this.isInTradingSession(incoming.timestamp)) {
       return { signal: 'hold', reason: 'Out of session', confidence: 0 };
     }
@@ -207,18 +204,13 @@ export class MNQDeltaTrendCalculator {
       return { passLong: true, passShort: true, lastClose, lastEma: NaN };
     }
     const L = Math.max(1, this.config.emaLength ?? 21);
-    
-    // FIX: Exclude the current bar from EMA calculation
-    const closesForEma = this.bars3min.slice(0, -1).map(b => b.close);
-    
-    if (closesForEma.length < L) {
+    const closes = this.bars3min.map(b => b.close);
+    if (closes.length < L) {
       return { passLong: false, passShort: false, lastClose: NaN, lastEma: NaN };
     }
-    
-    const emaSeries = this.technical.calculateEMA(closesForEma, L);
-    const lastClose = this.bars3min[this.bars3min.length - 1].close;
+    const emaSeries = this.technical.calculateEMA(closes, L);
+    const lastClose = closes[closes.length - 1];
     const lastEma = emaSeries[emaSeries.length - 1];
-    
     return { passLong: lastClose > lastEma, passShort: lastClose < lastEma, lastClose, lastEma };
   }
 
@@ -236,19 +228,14 @@ export class MNQDeltaTrendCalculator {
     return px > ema ? 'bullish' : px < ema ? 'bearish' : 'neutral';
   }
 
-  private checkBreakoutCloseTol() {
+  private checkBreakoutCloseTol(): { brokeUpCloseTol: boolean; brokeDownCloseTol: boolean } {
     const n = Math.max(1, this.config.breakoutLookbackBars ?? 20);
-    if (this.bars3min.length < n) {
-      return { brokeUpCloseTol: false, brokeDownCloseTol: false };
-    }
-    const window = this.bars3min.slice(-n);
-    const last = window[window.length - 1];
-    const rangeHigh = Math.max(...window.map(b => b.high));
-    const rangeLow = Math.min(...window.map(b => b.low));
-    return {
-      brokeUpCloseTol: last.close > rangeHigh * 0.995,
-      brokeDownCloseTol: last.close < rangeLow * 1.005,
-    };
+    if (this.bars3min.length < n + 1) return { brokeUpCloseTol: false, brokeDownCloseTol: false };
+    const recent = this.bars3min.slice(-n - 1, -1);
+    const lastClose = this.bars3min[this.bars3min.length - 1].close;
+    const high = Math.max(...recent.map(b => b.high));
+    const low = Math.min(...recent.map(b => b.low));
+    return { brokeUpCloseTol: lastClose > high, brokeDownCloseTol: lastClose < low };
   }
 
   private checkExitConditions(bar: BarData, _marketState: MarketState): TradeSignal | null {
@@ -266,16 +253,10 @@ export class MNQDeltaTrendCalculator {
     return null;
   }
 
-  private smaSignedDelta(n: number, endIndex: number): number {
-    if (endIndex < 0) return NaN;
-    const start = Math.max(0, endIndex - n + 1);
-    if (endIndex - start + 1 < n) return NaN;
-    let sum = 0;
-    for (let i = start; i <= endIndex; i++) {
-      const d = (this.bars3min[i].delta ?? (this.bars3min[i].close - (this.bars3min[i - 1]?.close ?? this.bars3min[i].open)));
-      sum += Number(d) || 0;
-    }
-    return sum / n;
+  private smaSignedDelta(len: number, endIdx: number): number {
+    if (endIdx < len - 1) return NaN;
+    const deltas = this.bars3min.slice(endIdx - len + 1, endIdx + 1).map(b => b.delta ?? 0);
+    return deltas.reduce((a, b) => a + b, 0) / len;
   }
 
   private generateSignal(
@@ -284,20 +265,14 @@ export class MNQDeltaTrendCalculator {
     gates: { brokeUpCloseTol: boolean; brokeDownCloseTol: boolean; passLong: boolean; passShort: boolean }
   ): TradeSignal {
     const { brokeUpCloseTol, brokeDownCloseTol, passLong, passShort } = gates;
-
-    if (this.lastEntryBarTimestamp === bar.timestamp) {
-      return { signal: 'hold', reason: 'Same bar re-entry blocked', confidence: 0 };
-    }
-
     const atr = marketState.atr;
-    const atrThreshold = this.config.minAtrToTrade ?? 9;
+    const atrThreshold = this.config.minAtrToTrade ?? 0;
     if (!(Number.isFinite(atr) && atr > atrThreshold)) {
-      return { signal: 'hold', reason: `ATR ${atr.toFixed(2)} ≤ ${atrThreshold}`, confidence: 0 };
+      return { signal: 'hold', reason: 'ATR gate failed', confidence: 0 };
     }
 
     const spike = this.config.deltaSpikeThreshold ?? 450;
     const delta = bar.delta ?? 0;
-    const absDelta = Math.abs(delta);
     const len = Math.max(1, this.config.deltaSMALength ?? 20);
     const deltaSMA = this.smaSignedDelta(len, this.bars3min.length - 1);
     if (!Number.isFinite(deltaSMA)) {
@@ -305,12 +280,14 @@ export class MNQDeltaTrendCalculator {
     }
 
     const surgeMult = this.config.deltaSurgeMultiplier ?? 1.8;
-    const passDeltaLong = delta > spike && delta > (deltaSMA * surgeMult);
-    const passDeltaShort = delta < -spike && delta < (deltaSMA * -surgeMult);
+    const longThreshold = deltaSMA * surgeMult;
+    const shortThreshold = deltaSMA * -surgeMult;
+
+    const passDeltaLong = delta > spike && delta > longThreshold;
+    const passDeltaShort = delta < -spike && delta < shortThreshold;
 
     const htf = marketState.higherTimeframeTrend;
 
-    // STRICT HTF ALIGNMENT REQUIRED – neutral is now BLOCKED
     if (passDeltaLong && htf === 'bullish' && brokeUpCloseTol) {
       if (this.config.useEmaFilter && !passLong) {
         return { signal: 'hold', reason: 'LTF EMA long filter not passed', confidence: 0 };
@@ -326,11 +303,6 @@ export class MNQDeltaTrendCalculator {
       return { signal: 'sell', reason: `Δ=${delta} < -spike & SMA×(-mult), strict bearish HTF`, confidence: 0.9 };
     }
 
-    // Explicitly block when HTF is neutral (this is the new protection)
-    if (htf === 'neutral') {
-      return { signal: 'hold', reason: 'HTF neutral – waiting for strict alignment', confidence: 0 };
-    }
-
     return { signal: 'hold', reason: 'No signal', confidence: 0 };
   }
 
@@ -343,7 +315,6 @@ export class MNQDeltaTrendCalculator {
     if (!this.isWarmUpProcessed) return { signal: 'hold', reason: 'Warm-up incomplete', confidence: 0 };
     if (this.hasPosition()) return { signal: 'hold', reason: 'Already in position', confidence: 0 };
 
-    // Session gate check for intra-bar entries
     if (!this.isInTradingSession(formingBar.timestamp)) {
       return { signal: 'hold', reason: 'Out of session (intra-bar)', confidence: 0 };
     }
@@ -397,7 +368,6 @@ export class MNQDeltaTrendCalculator {
 
     const spike = this.config.deltaSpikeThreshold ?? 450;
     const delta = formingBar.delta ?? 0;
-    const absDelta = Math.abs(delta);
     const len = Math.max(1, this.config.deltaSMALength ?? 20);
     const deltaSMA = this.smaSignedDelta(len, this.bars3min.length - 1);
     if (!Number.isFinite(deltaSMA)) {
@@ -408,26 +378,25 @@ export class MNQDeltaTrendCalculator {
     const longThreshold = deltaSMA * surgeMult;
     const shortThreshold = deltaSMA * -surgeMult;
 
-    // FADE PROTECTION — FIXED (blocks weak momentum for chop avoidance)
-    let fadeOk = true;
-    const lookback = this.config.fadeLookback ?? 5;
-    const fadeRatio = this.config.deltaFadeRatio ?? 0.7;
-    if (this.intraBarDeltaHistory.length >= lookback) {
-      const recent = this.intraBarDeltaHistory.slice(-lookback);
-      const avgAbs = recent.reduce((sum, e) => sum + Math.abs(e.delta), 0) / lookback;
-      const lastAbs = Math.abs(this.intraBarDeltaHistory[this.intraBarDeltaHistory.length - 1].delta);
-      if (lastAbs < avgAbs * fadeRatio) {
-        fadeOk = false;
-        console.info(`[MNQDeltaTrend][FADE BLOCK] last tick |δ|=${lastAbs} < ${fadeRatio}× recent avg (${avgAbs.toFixed(0)}) → intra-bar signal blocked`);
-      }
+    // ORIGINAL WINNING FADE FILTER (peakAbs version — the one that printed)
+    const peakAbs = Math.max(...this.intraBarDeltaHistory.map(e => Math.abs(e.delta)), 0);
+    const currAbs = this.intraBarDeltaHistory.length > 0 
+      ? Math.abs(this.intraBarDeltaHistory[this.intraBarDeltaHistory.length - 1].delta)
+      : 0;
+    const fadeOk = peakAbs === 0 || currAbs >= peakAbs * (this.config.deltaFadeRatio ?? 0.7);
+
+    if (!fadeOk) {
+      return { signal: 'hold', reason: `Fade: currAbs=${currAbs} < 70% of peak ${peakAbs}`, confidence: 0 };
     }
-    
-    const passDeltaLong = delta > spike && delta > longThreshold && fadeOk;
-    const passDeltaShort = delta < -spike && delta < shortThreshold && fadeOk;
+
+    const allConfirmLong = this.intraBarDeltaHistory.every(e => e.delta > spike && e.delta > longThreshold);
+    const allConfirmShort = this.intraBarDeltaHistory.every(e => e.delta < -spike && e.delta < shortThreshold);
+
+    const passDeltaLong = delta > spike && delta > longThreshold && allConfirmLong && fadeOk;
+    const passDeltaShort = delta < -spike && delta < shortThreshold && allConfirmShort && fadeOk;
 
     const htf = marketState.higherTimeframeTrend;
 
-    // STRICT HTF ALIGNMENT REQUIRED – neutral is now BLOCKED
     if (passDeltaLong && htf === 'bullish' && brokeUpCloseTol) {
       if (this.config.useEmaFilter && !passLong) return { signal: 'hold', reason: 'EMA filter', confidence: 0 };
       return { signal: 'buy', reason: `[INTRA] Δ=${delta} (fadeOK, ${this.intraBarDeltaHistory.length} confirms)`, confidence: 0.85 };
@@ -437,15 +406,9 @@ export class MNQDeltaTrendCalculator {
       return { signal: 'sell', reason: `[INTRA] Δ=${delta} (fadeOK, ${this.intraBarDeltaHistory.length} confirms)`, confidence: 0.85 };
     }
 
-    // Explicitly block when HTF is neutral
-    if (htf === 'neutral') {
-      return { signal: 'hold', reason: 'HTF neutral – waiting for strict alignment', confidence: 0 };
-    }
-
     return { signal: 'hold', reason: 'No intra signal', confidence: 0 };
   }
 
-  // === PUBLIC API ===
   public resetIntraBarTracking(): void {
     this.intraBarDeltaHistory = [];
   }
@@ -470,26 +433,16 @@ export class MNQDeltaTrendCalculator {
   }
 
   public setPosition(entryPrice: number, direction: 'long' | 'short', atrForTrail?: number): void {
-    const configCap = Number(this.config.atrCap ?? 12);
-
-    // Use the last known HTF trend from the calculator's internal state
-    // (this is updated on every bar in processNewBar/evaluateFormingBar)
-    const lastKnownTrend = this.determineTrend();  // This method has access to bars15min
-
-    const effectiveCap = lastKnownTrend === 'neutral' ? 8 : configCap;
-
     const atrSeed = Math.min(
       (typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal,
-      effectiveCap
+      Number(this.config.atrCap ?? 16)
     );
-
     const slDist = atrSeed * (this.config.atrStopLossMultiplier ?? 0.75);
     const stopLoss = direction === 'long' ? entryPrice - slDist : entryPrice + slDist;
 
     this.currentPosition = { entryPrice, entryTime: Date.now(), direction, stopLoss, atrSeed };
     this.trailingStopLevel = stopLoss;
     this.trailArmed = false;
-    // In setPosition():
     this.noTrailBeforeMs = Date.now() + (this.config.tickExitGraceMs ?? 0);
   }
 
