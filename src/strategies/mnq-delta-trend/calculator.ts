@@ -1,4 +1,4 @@
-// calculator.ts — Exact code used on Nov 13, 2025 (the winning day)
+// calculator.ts — Fixed code used on Nov 13, 2025 no Direction Tick Validation
 import { BarData, MarketState, StrategyConfig, TradeSignal } from './types';
 import { TechnicalCalculator } from '../../utils/technical';
 
@@ -59,11 +59,7 @@ export class MNQDeltaTrendCalculator {
     try {
       const tz = 'America/New_York';
       const barTime = new Date(timestamp);
-      const options: Intl.DateTimeFormatOptions = { 
-        hour: '2-digit', 
-        minute: '2-digit', 
-        hour12: false, 
-        timeZone: tz };
+      const options: Intl.DateTimeFormatOptions = { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: tz };
       const hhmm = new Intl.DateTimeFormat('en-US', options).format(barTime);
       const [h, m] = hhmm.split(':').map(n => parseInt(n, 10));
       const currentMinutes = h * 60 + m;
@@ -238,6 +234,20 @@ export class MNQDeltaTrendCalculator {
     return { brokeUpCloseTol: lastClose > high, brokeDownCloseTol: lastClose < low };
   }
 
+  private checkBreakoutCloseTolForming(forming: BarData) {
+    const n = Math.max(1, this.config.breakoutLookbackBars ?? 20);
+    if (this.bars3min.length < n) {
+      return { brokeUpCloseTol: false, brokeDownCloseTol: false };
+    }
+    const window = this.bars3min.slice(-n);
+    const hi = Math.max(...window.map(b => b.high));
+    const lo = Math.min(...window.map(b => b.low));
+    return { 
+      brokeUpCloseTol: forming.close > hi, 
+      brokeDownCloseTol: forming.close < lo 
+    };
+  }
+
   private checkExitConditions(bar: BarData, _marketState: MarketState): TradeSignal | null {
     if (!this.currentPosition) return null;
     const { entryTime, direction, stopLoss } = this.currentPosition;
@@ -277,6 +287,18 @@ export class MNQDeltaTrendCalculator {
     const deltaSMA = this.smaSignedDelta(len, this.bars3min.length - 1);
     if (!Number.isFinite(deltaSMA)) {
       return { signal: 'hold', reason: 'Delta SMA not ready', confidence: 0 };
+    }
+
+    // After deltaSMA calculation, add:
+    if (this.bars3min.length >= 2) {
+      const prevDelta = this.bars3min[this.bars3min.length - 2].delta ?? 0;
+      const peakAbs = Math.max(Math.abs(prevDelta), Math.abs(delta));
+      const currAbs = Math.abs(delta);
+      const fadeOk = peakAbs === 0 || currAbs >= peakAbs * (this.config.deltaFadeRatio ?? 0.7);
+      
+      if (!fadeOk) {
+        return { signal: 'hold', reason: `Bar-close fade: ${currAbs} < 70% of peak ${peakAbs}`, confidence: 0 };
+      }
     }
 
     const surgeMult = this.config.deltaSurgeMultiplier ?? 1.8;
@@ -339,7 +361,7 @@ export class MNQDeltaTrendCalculator {
 
     const atr = this.calculateATR();
     const trend = this.determineTrend();
-    const { brokeUpCloseTol, brokeDownCloseTol } = this.checkBreakoutCloseTol();
+    const { brokeUpCloseTol, brokeDownCloseTol } = this.checkBreakoutCloseTolForming(formingBar);
     const { passLong, passShort } = this.checkLtfEmaFilter();
 
     marketState.atr = Number.isFinite(atr) ? atr : 0;
@@ -389,11 +411,9 @@ export class MNQDeltaTrendCalculator {
       return { signal: 'hold', reason: `Fade: currAbs=${currAbs} < 70% of peak ${peakAbs}`, confidence: 0 };
     }
 
-    const allConfirmLong = this.intraBarDeltaHistory.every(e => e.delta > spike && e.delta > longThreshold);
-    const allConfirmShort = this.intraBarDeltaHistory.every(e => e.delta < -spike && e.delta < shortThreshold);
-
-    const passDeltaLong = delta > spike && delta > longThreshold && allConfirmLong && fadeOk;
-    const passDeltaShort = delta < -spike && delta < shortThreshold && allConfirmShort && fadeOk;
+    // Removed impossible per-tick delta checks - fade protection already validates momentum quality
+    const passDeltaLong = delta > spike && delta > longThreshold && fadeOk;
+    const passDeltaShort = delta < -spike && delta < shortThreshold && fadeOk;
 
     const htf = marketState.higherTimeframeTrend;
 
