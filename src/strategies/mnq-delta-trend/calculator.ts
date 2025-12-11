@@ -1,4 +1,4 @@
-// calculator.ts — Fixed code used on Nov 13, 2025 no Direction Tick Validation
+// calculator.ts — Fixed code used on Nov 13, 2025 includes Bar Age Filter with no Direction Tick Validation
 import { BarData, MarketState, StrategyConfig, TradeSignal } from './types';
 import { TechnicalCalculator } from '../../utils/technical';
 
@@ -344,6 +344,13 @@ export class MNQDeltaTrendCalculator {
     const minAccumMs = this.config.intraBarMinAccumulationMs ?? 3000;
     if (accumulationTimeMs < minAccumMs) {
       return { signal: 'hold', reason: `Accum < ${minAccumMs}ms`, confidence: 0 };
+    }
+
+    // Bar Age 60% filter
+    const barStepMs = 3 * 60 * 1000; // 3 minutes in ms
+    const maxBarAgePct = 0.60;
+    if (accumulationTimeMs > (barStepMs * maxBarAgePct)) {
+      return { signal: 'hold', reason: `Bar ${(accumulationTimeMs/barStepMs*100).toFixed(0)}% complete`, confidence: 0 };
     }
 
     const nowMs = Date.now();
