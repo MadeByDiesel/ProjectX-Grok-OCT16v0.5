@@ -1,4 +1,4 @@
-// calculator.ts — Fixed code used on Nov 13, 2025 includes Bar Age Filter with no Direction Tick Validation
+// calculator.ts — Fixed code used on Nov 13, 2025 includes Bar Age Filter
 import { BarData, MarketState, StrategyConfig, TradeSignal } from './types';
 import { TechnicalCalculator } from '../../utils/technical';
 
