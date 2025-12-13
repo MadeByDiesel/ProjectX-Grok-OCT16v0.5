@@ -24,7 +24,7 @@ export const MNQ_DELTA_TREND_CONFIG: StrategyConfig = {
 
   // === ATR & EXIT CONFIGURATION ===
   atrProfitMultiplier: 1.0,    
-  atrStopLossMultiplier: 0.75,  //0.3-0.5
+  atrStopLossMultiplier: 0.75,  
   minAtrToTrade: 9,        
   minBarsBeforeExit: 0,
 
@@ -39,7 +39,7 @@ export const MNQ_DELTA_TREND_CONFIG: StrategyConfig = {
   
   // ... existing configs ...
   fadeLookback: 3,
-  deltaFadeRatio: 0.70,
+  deltaFadeRatio: 0.80,
 
   // === POSITION SIZING ===
   contractQuantity: 1,
@@ -55,9 +55,9 @@ export const MNQ_DELTA_TREND_CONFIG: StrategyConfig = {
   // Intra-bar detection settings
   useIntraBarDetection: true,              // Enable intra-bar signals
   intraBarCheckIntervalMs: 100,            // Check every 100ms
-  intraBarMinAccumulationMs: 5000,         // Wait 5 seconds before first check
+  intraBarMinAccumulationMs: 2500,         // Wait 2.5 seconds before first check
   intraBarConfirmationChecks: 3,           // Require 3 consecutive confirmations
-  intraBarConfirmationWindowMs: 300,       // Within 500ms window
+  intraBarConfirmationWindowMs: 300,       // Within 300ms window
 
   sendWebhook: false,
   webhookUrl: '' //'http://192.168.4.170:8080/signal?secret=toast',
