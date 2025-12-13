@@ -348,17 +348,18 @@ export class MNQDeltaTrendCalculator {
 
     // Bar Age 60% filter
     const barStepMs = 3 * 60 * 1000; // 3 minutes in ms
-    const maxBarAgePct = 0.60;
+    const maxBarAgePct = 0.50;
     if (accumulationTimeMs > (barStepMs * maxBarAgePct)) {
       return { signal: 'hold', reason: `Bar ${(accumulationTimeMs/barStepMs*100).toFixed(0)}% complete`, confidence: 0 };
     }
 
     const nowMs = Date.now();
     const confirmWindowMs = this.config.intraBarConfirmationWindowMs ?? 500;
-    this.intraBarDeltaHistory = this.intraBarDeltaHistory.filter(e => nowMs - e.timestamp <= confirmWindowMs);
+    // Create filtered copy - DON'T mutate this.intraBarDeltaHistory
+    const recentHistory = this.intraBarDeltaHistory.filter(e => nowMs - e.timestamp <= confirmWindowMs);
 
     const required = this.config.intraBarConfirmationChecks ?? 3;
-    if (this.intraBarDeltaHistory.length < required) {
+    if (recentHistory.length < required) {
       return { signal: 'hold', reason: `Need ${required} confirms`, confidence: 0 };
     }
 
@@ -369,7 +370,14 @@ export class MNQDeltaTrendCalculator {
     const atr = this.calculateATR();
     const trend = this.determineTrend();
     const { brokeUpCloseTol, brokeDownCloseTol } = this.checkBreakoutCloseTolForming(formingBar);
-    const { passLong, passShort } = this.checkLtfEmaFilter();
+
+    // ⬇️ REPLACE the old "const { passLong, passShort } = this.checkLtfEmaFilter();" with this:
+    const { lastEma } = this.checkLtfEmaFilter();
+    if (this.config.useEmaFilter && !Number.isFinite(lastEma)) {
+      return { signal: 'hold', reason: 'EMA not ready', confidence: 0 };
+    }
+    const passLong  = !this.config.useEmaFilter || formingBar.close > lastEma;
+    const passShort = !this.config.useEmaFilter || formingBar.close < lastEma; 
 
     marketState.atr = Number.isFinite(atr) ? atr : 0;
     marketState.higherTimeframeTrend = trend;

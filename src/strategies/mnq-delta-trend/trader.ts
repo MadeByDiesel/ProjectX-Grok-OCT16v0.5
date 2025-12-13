@@ -331,12 +331,16 @@ export class MNQDeltaTrendTrader {
     this.volInBarByContract.set(this.contractId, 0);
     this.signedVolInBarByContract.set(this.contractId, 0);
 
-    // Process bar-close signal (fallback if intra-bar didn’t fire)
-    if (!this.reconciling) {
-      const signal = this.calculator.processNewBar(closedBar as any, this.marketState as any);
-      void this.handleSignal(signal, closedBar);
-    }
+    // Always update calculator state on every bar close
+    const signal = this.calculator.processNewBar(closedBar as any, this.marketState as any);
 
+    // Only ACT on bar-close signals when intrabar is OFF (and not reconciling)
+    if (!this.config.useIntraBarDetection && !this.reconciling) {
+      void this.handleSignal(signal, closedBar);
+    } else {
+      console.debug('[MNQDeltaTrend][barClose] state updated; orders suppressed (intra-bar ON or reconciling)');
+    }
+    
     console.debug(
       `[MNQDeltaTrend][barClose] t=${closedBar.timestamp} O:${closedBar.open} H:${closedBar.high} L:${closedBar.low} C:${closedBar.close} Δ:${closedBar.delta} V:${closedBar.volume}`
     );
