@@ -434,11 +434,11 @@ export class MNQDeltaTrendCalculator {
 
     if (passDeltaLong && htf === 'bullish' && brokeUpCloseTol) {
       if (this.config.useEmaFilter && !passLong) return { signal: 'hold', reason: 'EMA filter', confidence: 0 };
-      return { signal: 'buy', reason: `[INTRA] Δ=${delta} (fadeOK, ${this.intraBarDeltaHistory.length} confirms)`, confidence: 0.85 };
+      return { signal: 'buy', reason: `[INTRA] Δ=${delta} fadeOK`, confidence: 0.85 };
     }
     if (passDeltaShort && htf === 'bearish' && brokeDownCloseTol) {
       if (this.config.useEmaFilter && !passShort) return { signal: 'hold', reason: 'EMA filter', confidence: 0 };
-      return { signal: 'sell', reason: `[INTRA] Δ=${delta} (fadeOK, ${this.intraBarDeltaHistory.length} confirms)`, confidence: 0.85 };
+      return { signal: 'sell', reason: `[INTRA] Δ=${delta} fadeOK`, confidence: 0.85 };
     }
 
     return { signal: 'hold', reason: 'No intra signal', confidence: 0 };
