@@ -39,7 +39,7 @@ export const MNQ_DELTA_TREND_CONFIG: StrategyConfig = {
   
   // ... existing configs ...
   fadeLookback: 3,
-  deltaFadeRatio: 0.80,
+  deltaFadeRatio: 0.7,
 
   // === POSITION SIZING ===
   contractQuantity: 1,
@@ -55,9 +55,9 @@ export const MNQ_DELTA_TREND_CONFIG: StrategyConfig = {
   // Intra-bar detection settings
   useIntraBarDetection: true,              // Enable intra-bar signals
   intraBarCheckIntervalMs: 100,            // Check every 100ms
-  intraBarMinAccumulationMs: 2500,         // Wait 2.5 seconds before first check
-  intraBarConfirmationChecks: 3,           // Require 3 consecutive confirmations
-  intraBarConfirmationWindowMs: 300,       // Within 300ms window
+  intraBarMinAccumulationMs: 500,         // Wait 2.5 seconds before first check
+  intraBarConfirmationChecks: 2,           // Require 3 consecutive confirmations
+  intraBarConfirmationWindowMs: 400,       // Within 300ms window
 
   sendWebhook: false,
   webhookUrl: '' //'http://192.168.4.170:8080/signal?secret=toast',
