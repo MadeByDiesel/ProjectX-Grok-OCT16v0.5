@@ -346,12 +346,12 @@ export class MNQDeltaTrendCalculator {
       return { signal: 'hold', reason: `Accum < ${minAccumMs}ms`, confidence: 0 };
     }
 
-    // Bar Age 60% filter
-    const barStepMs = 3 * 60 * 1000; // 3 minutes in ms
-    const maxBarAgePct = 0.50;
-    if (accumulationTimeMs > (barStepMs * maxBarAgePct)) {
-      return { signal: 'hold', reason: `Bar ${(accumulationTimeMs/barStepMs*100).toFixed(0)}% complete`, confidence: 0 };
-    }
+    // // Bar Age 60% filter
+    // const barStepMs = 3 * 60 * 1000; // 3 minutes in ms
+    // const maxBarAgePct = 0.50;
+    // if (accumulationTimeMs > (barStepMs * maxBarAgePct)) {
+    //   return { signal: 'hold', reason: `Bar ${(accumulationTimeMs/barStepMs*100).toFixed(0)}% complete`, confidence: 0 };
+    // }
 
     const nowMs = Date.now();
     const confirmWindowMs = this.config.intraBarConfirmationWindowMs ?? 500;
@@ -415,20 +415,23 @@ export class MNQDeltaTrendCalculator {
     const longThreshold = deltaSMA * surgeMult;
     const shortThreshold = deltaSMA * -surgeMult;
 
-    // ORIGINAL WINNING FADE FILTER (peakAbs version — the one that printed)
-    const peakAbs = Math.max(...this.intraBarDeltaHistory.map(e => Math.abs(e.delta)), 0);
-    const currAbs = this.intraBarDeltaHistory.length > 0 
-      ? Math.abs(this.intraBarDeltaHistory[this.intraBarDeltaHistory.length - 1].delta)
-      : 0;
-    const fadeOk = peakAbs === 0 || currAbs >= peakAbs * (this.config.deltaFadeRatio ?? 0.7);
+    // // ORIGINAL WINNING FADE FILTER (peakAbs version — the one that printed)
+    // const peakAbs = Math.max(...this.intraBarDeltaHistory.map(e => Math.abs(e.delta)), 0);
+    // const currAbs = this.intraBarDeltaHistory.length > 0 
+    //   ? Math.abs(this.intraBarDeltaHistory[this.intraBarDeltaHistory.length - 1].delta)
+    //   : 0;
+    // const fadeOk = peakAbs === 0 || currAbs >= peakAbs * (this.config.deltaFadeRatio ?? 0.7);
 
-    if (!fadeOk) {
-      return { signal: 'hold', reason: `Fade: currAbs=${currAbs} < 70% of peak ${peakAbs}`, confidence: 0 };
-    }
+    // if (!fadeOk) {
+    //   return { signal: 'hold', reason: `Fade: currAbs=${currAbs} < 70% of peak ${peakAbs}`, confidence: 0 };
+    // }
 
     // Removed impossible per-tick delta checks - fade protection already validates momentum quality
-    const passDeltaLong = delta > spike && delta > longThreshold && fadeOk;
-    const passDeltaShort = delta < -spike && delta < shortThreshold && fadeOk;
+    // const passDeltaLong = delta > spike && delta > longThreshold && fadeOk;
+    // const passDeltaShort = delta < -spike && delta < shortThreshold && fadeOk;
+
+    const passDeltaLong = delta > spike && delta > longThreshold;
+    const passDeltaShort = delta < -spike && delta < shortThreshold;
 
     const htf = marketState.higherTimeframeTrend;
 

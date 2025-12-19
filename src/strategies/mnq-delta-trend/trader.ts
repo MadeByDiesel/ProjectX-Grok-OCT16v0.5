@@ -18,6 +18,7 @@ export class MNQDeltaTrendTrader {
   private lastCumVolByContract = new Map<string, number>();
   private signedVolInBarByContract = new Map<string, number>();
   private volInBarByContract = new Map<string, number>();
+  private prevClosedBarClose: number | null = null;
 
   // Open 3m bar state
   private barOpenPx: number | null = null;
@@ -62,7 +63,7 @@ export class MNQDeltaTrendTrader {
     const secret = (this as any).config?.webhookSecret;
     const url = (!base.includes('?') && secret) ? `${base}?secret=${secret}` : base;
 
-    const payload: Record<string, any> = { symbol: this.symbol || 'MNQ', action };
+    const payload: Record<string, any> = { symbol: 'MNQ', action };
     if (action !== 'FLAT') payload.qty = Math.max(1, Number(qty ?? 1));
 
     const body = JSON.stringify(payload);
@@ -197,15 +198,21 @@ export class MNQDeltaTrendTrader {
     let dVol = 0;
     if (typeof prevCum === 'number' && cumVol >= prevCum) dVol = cumVol - prevCum;
 
-    // Signed by tick direction
-    const signed = typeof prevPx === 'number'
-      ? (px > prevPx ? dVol : px < prevPx ? -dVol : 0)
-      : 0;
-
-    // Accumulate into forming bar totals
+    // Accumulate volume
     this.volInBarByContract.set(contractId, (this.volInBarByContract.get(contractId) ?? 0) + (Number.isFinite(dVol) ? dVol : 0));
-    this.signedVolInBarByContract.set(contractId, (this.signedVolInBarByContract.get(contractId) ?? 0) + (Number.isFinite(signed) ? signed : 0));
 
+    // Pine parity: recalculate bar delta vs previous closed bar (not tick-to-tick accumulation)
+    const barVol = this.volInBarByContract.get(contractId) ?? 0;
+    let barDelta = 0;
+    if (this.prevClosedBarClose !== null) {
+      if (px > this.prevClosedBarClose) {
+        barDelta = barVol;
+      } else if (px < this.prevClosedBarClose) {
+        barDelta = -barVol;
+      }
+    }
+    this.signedVolInBarByContract.set(contractId, barDelta);
+  
     // Push **per-tick signed** delta into calculator’s intra-bar window
     this.calculator.pushIntraBarDelta(signed, nowMs);
 
@@ -326,6 +333,9 @@ export class MNQDeltaTrendTrader {
       volume: volume,
       delta: signed,
     };
+
+    // Store for next bar's delta calculation
+    this.prevClosedBarClose = closePx!;
 
     // Reset accumulators for next bar
     this.volInBarByContract.set(this.contractId, 0);
