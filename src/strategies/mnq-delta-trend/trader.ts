@@ -198,8 +198,13 @@ export class MNQDeltaTrendTrader {
     let dVol = 0;
     if (typeof prevCum === 'number' && cumVol >= prevCum) dVol = cumVol - prevCum;
 
-    // Accumulate volume
+// Accumulate volume
     this.volInBarByContract.set(contractId, (this.volInBarByContract.get(contractId) ?? 0) + (Number.isFinite(dVol) ? dVol : 0));
+
+    // Per-tick signed delta for exhaustion tracking
+    const signed = typeof prevPx === 'number'
+      ? (px > prevPx ? dVol : px < prevPx ? -dVol : 0)
+      : 0;
 
     // Pine parity: recalculate bar delta vs previous closed bar (not tick-to-tick accumulation)
     const barVol = this.volInBarByContract.get(contractId) ?? 0;
@@ -213,7 +218,7 @@ export class MNQDeltaTrendTrader {
     }
     this.signedVolInBarByContract.set(contractId, barDelta);
   
-    // Push **per-tick signed** delta into calculator’s intra-bar window
+    // Push per-tick signed delta into calculator's intra-bar window
     this.calculator.pushIntraBarDelta(signed, nowMs);
 
     // Now update last refs
