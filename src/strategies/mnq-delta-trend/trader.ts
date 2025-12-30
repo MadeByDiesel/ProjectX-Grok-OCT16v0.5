@@ -131,7 +131,8 @@ export class MNQDeltaTrendTrader {
     this.lastIntraBarCheckMs = 0;
     this.enteredBarStartMs = null;
     this.calculator.resetState();
-
+    this.calculator.completeWarmUp();  // Restore isWarmUpProcessed=true
+    
     this.running = true;
 
     try {
