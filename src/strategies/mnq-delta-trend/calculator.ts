@@ -97,6 +97,7 @@ export class MNQDeltaTrendCalculator {
 
   completeWarmUp(): void {
     this.isWarmUpProcessed = true;
+    console.info(`[MNQDeltaTrend][warmup] complete - bars3min=${this.bars3min.length} bars15min=${this.bars15min.length}`);
     if (this.bars3min.length > 0 || this.bars15min.length > 0) {
       void this.calculateATR();
       void this.determineTrend();
@@ -143,7 +144,16 @@ export class MNQDeltaTrendCalculator {
     const exitSignal = this.checkExitConditions(bar, marketState);
     if (exitSignal) return exitSignal;
 
-    return this.generateSignal(bar, marketState, { brokeUpCloseTol, brokeDownCloseTol, passLong, passShort });
+    const signal = this.generateSignal(bar, marketState, { brokeUpCloseTol, brokeDownCloseTol, passLong, passShort });
+
+    // NEW DEBUG LOG (placed right before return)
+    if (signal.signal === 'hold') {
+      console.debug('[BarClose Eval] HOLD reason:', signal.reason, 'delta=', bar.delta, 'barsLen=', this.bars3min.length);
+    } else {
+      console.info('[BarClose Eval] SIGNAL:', signal.signal, 'reason:', signal.reason, 'confidence:', signal.confidence);
+    }
+
+    return signal;
   }
 
   private updateHigherTimeframeBars(bar: BarData): void {
@@ -387,6 +397,13 @@ export class MNQDeltaTrendCalculator {
 
     const signal = this.generateSignalForFormingBar(formingBar, marketState, { brokeUpCloseTol, brokeDownCloseTol, passLong, passShort });
 
+    // NEW DEBUG LOG
+    if (signal.signal === 'hold') {
+      console.debug('[Intra Eval] HOLD reason:', signal.reason, 'delta=', formingBar.delta, 'historyLen=', this.intraBarDeltaHistory.length);
+    } else {
+      console.info('[Intra Eval] SIGNAL:', signal.signal, 'reason:', signal.reason, 'confidence:', signal.confidence);
+    }
+
     if (signal.signal !== 'hold') {
       this.lastIntraBarSignalTime = nowMs;
     }
@@ -468,10 +485,19 @@ export class MNQDeltaTrendCalculator {
   }
 
   public setPosition(entryPrice: number, direction: 'long' | 'short', atrForTrail?: number): void {
-    const atrSeed = Math.min(
-      (typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal,
-      Number(this.config.atrCap ?? 16)
-    );
+    // const atrSeed = Math.min(
+    //   (typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal,
+    //   Number(this.config.atrCap ?? 16)
+    // );
+
+        // Added config userAtrCap = true/false
+    const atrSeed = this.config.useAtrCap
+      ? Math.min(
+          (typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal,
+          Number(this.config.atrCap ?? 16)
+        )
+      : (typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal; 
+
     const slDist = atrSeed * (this.config.atrStopLossMultiplier ?? 0.75);
     const stopLoss = direction === 'long' ? entryPrice - slDist : entryPrice + slDist;
 
@@ -537,13 +563,10 @@ export class MNQDeltaTrendCalculator {
 
   // Reset method called from trader.start()
   public resetState(): void {
-    this.bars3min = [];
-    this.bars15min = [];
     this.lastHTFBucketStartMs = null;
     this.intraBarDeltaHistory = [];
     this.lastIntraBarSignalTime = 0;
     this.lastEntryBarTimestamp = null;
-    this.isWarmUpProcessed = false;
     this.currentPosition = null;
     this.trailingStopLevel = 0;
     this.trailArmed = false;
