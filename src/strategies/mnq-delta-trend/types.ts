@@ -55,6 +55,7 @@ export interface StrategyConfig {
   
    // ---- Added for v0.5 ----
   atrCap?: number;               // e.g. 24
+  useAtrCap?:boolean;
   tickExitGraceMs?: number;      // e.g. 2000
   
    // Intra-bar detection settings

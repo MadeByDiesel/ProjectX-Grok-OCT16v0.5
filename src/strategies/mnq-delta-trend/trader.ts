@@ -1,4 +1,4 @@
-// src/strategies/mnq-delta-trend/trader.ts
+// src/strategies/mnq-delta-trend/trader.ts - Dec 26 Claude 
 import { ProjectXClient } from '../../services/projectx-client';
 import { MNQDeltaTrendCalculator } from './calculator';
 import { StrategyConfig } from './types';
@@ -18,6 +18,7 @@ export class MNQDeltaTrendTrader {
   private lastCumVolByContract = new Map<string, number>();
   private signedVolInBarByContract = new Map<string, number>();
   private volInBarByContract = new Map<string, number>();
+  private prevClosedBarClose: number | null = null;
 
   // Open 3m bar state
   private barOpenPx: number | null = null;
@@ -113,19 +114,66 @@ export class MNQDeltaTrendTrader {
     this.symbol = opts.symbol;
   }
 
+  /**
+   * Reset all trader state for clean session start.
+   * Called before connecting to ensure no stale data from previous session.
+   */
+  private resetTraderState(): void {
+    // Clear all Maps
+    this.lastPriceByContract.clear();
+    this.lastCumVolByContract.clear();
+    this.signedVolInBarByContract.clear();
+    this.volInBarByContract.clear();
+
+    // Reset Pine-style delta tracking
+    this.prevClosedBarClose = null;
+
+    // Null all bar tracking vars
+    this.barOpenPx = null;
+    this.barHighPx = null;
+    this.barLowPx = null;
+    this.barStartMs = null;
+    this.liveBarOpen = null;
+    this.liveBarHigh = null;
+    this.liveBarLow = null;
+    this.liveBarStartMs = null;
+    this.lastIntraBarCheckMs = 0;
+
+    // Reset entry tracking
+    this.enteredBarStartMs = null;
+    this.isEnteringPosition = false;
+    this.isFlattening = false;
+    this.reconciling = false;
+
+    // Reset market state
+    this.marketState = {
+      atr: 0,
+      higherTimeframeTrend: 'neutral',
+      deltaCumulative: 0
+    };
+  }
+
   public async start(): Promise<void> {
+    // FULL STATE RESET - critical for daily clean start
+    this.resetTraderState();
+    this.calculator.resetState();
     this.running = true;
 
-    await this.client.connectWebSocket();
-    await this.client.getSignalRService().subscribeToMarketData(this.contractId);
-
-    this.client.onMarketData(this.marketDataHandler);
+    try {
+      await this.client.connectWebSocket();
+      await this.client.getSignalRService().subscribeToMarketData(this.contractId);
+      this.client.onMarketData(this.marketDataHandler);
+    } catch (err) {
+      console.error('[MNQDeltaTrend][start] WebSocket/MarketData subscription failed:', err);
+    }
 
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = setInterval(() => {
       if (!this.running) return;
       this.maybeCloseBarByClock();
     }, 1000);
+
+    console.info(`[MNQDeltaTrend][Trader] started - full state reset performed`);
   }
 
   public async stop(): Promise<void> {
@@ -195,18 +243,36 @@ export class MNQDeltaTrendTrader {
     const cumVol = (q as any).volume ?? 0; // GatewayQuote 'volume' treated as cumulative
 
     let dVol = 0;
-    if (typeof prevCum === 'number' && cumVol >= prevCum) dVol = cumVol - prevCum;
+    if (typeof prevCum === 'number') {
+      if (cumVol >= prevCum) {
+        dVol = cumVol - prevCum;
+      } else {
+        // Broker reset detected
+        dVol = cumVol;
+        this.lastCumVolByContract.set(contractId, 0);
+      }
+    } else {
+      dVol = cumVol;
+    }
 
-    // Signed by tick direction
+    // Accumulate volume
+    this.volInBarByContract.set(contractId, (this.volInBarByContract.get(contractId) ?? 0) + (Number.isFinite(dVol) ? dVol : 0));
+
+    // Per-tick signed delta for exhaustion tracking (fade filter)
     const signed = typeof prevPx === 'number'
       ? (px > prevPx ? dVol : px < prevPx ? -dVol : 0)
       : 0;
 
-    // Accumulate into forming bar totals
-    this.volInBarByContract.set(contractId, (this.volInBarByContract.get(contractId) ?? 0) + (Number.isFinite(dVol) ? dVol : 0));
-    this.signedVolInBarByContract.set(contractId, (this.signedVolInBarByContract.get(contractId) ?? 0) + (Number.isFinite(signed) ? signed : 0));
+    // Pine-style delta: recalculate entire bar volume direction vs previous closed bar
+    const barVol = this.volInBarByContract.get(contractId) ?? 0;
+    let barDelta = 0;
+    if (this.prevClosedBarClose !== null) {
+      if (px > this.prevClosedBarClose) barDelta = barVol;
+      else if (px < this.prevClosedBarClose) barDelta = -barVol;
+    }
+    this.signedVolInBarByContract.set(contractId, barDelta);
 
-    // Push **per-tick signed** delta into calculator’s intra-bar window
+    // Push per-tick signed delta into calculator's intra-bar window
     this.calculator.pushIntraBarDelta(signed, nowMs);
 
     // Now update last refs
@@ -327,9 +393,17 @@ export class MNQDeltaTrendTrader {
       delta: signed,
     };
 
+    // Store for Pine-style delta calculation in next bar
+    this.prevClosedBarClose = closePx!;
+
     // Reset accumulators for next bar
     this.volInBarByContract.set(this.contractId, 0);
     this.signedVolInBarByContract.set(this.contractId, 0);
+
+    // Complete warmup once we have enough bars
+    if (!this.calculator.getWarmUpStatus().isComplete && this.calculator.bars3min.length >= 20) {
+      this.calculator.completeWarmUp();
+    }
 
     // Always update calculator state on every bar close
     const signal = this.calculator.processNewBar(closedBar as any, this.marketState as any);
@@ -354,46 +428,33 @@ export class MNQDeltaTrendTrader {
     signal: { signal: 'buy' | 'sell' | 'hold' | 'exit'; reason: string; confidence: number },
     bar: BarData
   ) {
-    // Ignore calculator’s optional 'exit' (we exit via tick-level SL/trail)
-    if (signal.signal === 'exit') return;
-
-    if (signal.signal === 'hold') {
-      console.debug('[MNQDeltaTrend][order] HOLD:', signal.reason);
+    if (signal.signal === 'exit' || signal.signal === 'hold') {
+      console.debug(`[MNQDeltaTrend][signal] HOLD: ${signal.reason}`);
       return;
     }
 
-    if (this.calculator.hasPosition()) {
-      console.debug('[MNQDeltaTrend][order] skipped: already in position');
-      return;
-    }
-    if (this.isEnteringPosition || this.reconciling) {
-      console.debug('[MNQDeltaTrend][order] skipped: entry in flight / reconciling');
-      return;
-    }
-    if (this.enteredBarStartMs === this.barStartMs) {
-      console.debug('[MNQDeltaTrend][order] skipped: already entered this bar');
-      return;
-    }
+    if (this.calculator.hasPosition()) return;
+    if (this.isEnteringPosition || this.reconciling) return;
+    if (this.enteredBarStartMs === this.barStartMs) return;
 
     const minAtr = Math.max(0, this.config.minAtrToTrade ?? 0);
     const atrNow = this.marketState.atr ?? 0;
-    if (!Number.isFinite(atrNow) || atrNow < minAtr) {
-      console.debug(`[MNQDeltaTrend][order] blocked: ATR gate failed (atr=${atrNow}, thresh=${minAtr})`);
-      return;
-    }
+    if (!Number.isFinite(atrNow) || atrNow < minAtr) return;
 
-    // --- CRITICAL RACE GUARD: claim bar BEFORE awaits to block the other path ---
     const barId = this.barStartMs!;
     this.enteredBarStartMs = barId;
 
     const direction = signal.signal === 'buy' ? 'long' : 'short';
-    const atrSnapshot = Math.min(atrNow, this.config.atrCap ?? 16); // enforce atrCap at snapshot
+    // const atrSnapshot = Math.min(atrNow, this.config.atrCap ?? 16);
+
+    const atrSnapshot = this.config.useAtrCap
+      ? Math.min(atrNow, this.config.atrCap ?? 16)
+      : atrNow;
 
     this.isEnteringPosition = true;
     this.reconciling = true;
 
     try {
-      // Freeze ATR at signal for SL/trail math
       this.calculator.captureAtrAtSignal(atrSnapshot);
 
       const acctBal = await this.client.getEquity();
@@ -420,7 +481,6 @@ export class MNQDeltaTrendTrader {
 
     } catch (err) {
       console.error('[MNQDeltaTrend][order] placement failed:', err);
-      // Roll back claim if order failed so other path can retry on this bar
       this.enteredBarStartMs = (this.barStartMs === barId) ? null : this.enteredBarStartMs;
     } finally {
       this.isEnteringPosition = false;

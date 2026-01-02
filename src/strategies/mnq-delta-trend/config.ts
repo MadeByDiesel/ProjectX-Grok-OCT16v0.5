@@ -30,6 +30,7 @@ export const MNQ_DELTA_TREND_CONFIG: StrategyConfig = {
 
   // NEW (v0.5)
   atrCap: 16,             // points, cap ATR at entry
+  useAtrCap:false,
   tickExitGraceMs: 0,  // time-based grace before trailing
 
   // === TRAILING STOP CONFIGURATION ===
