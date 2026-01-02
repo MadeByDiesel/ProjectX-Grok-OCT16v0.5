@@ -19,7 +19,8 @@ export class MNQDeltaTrendCalculator {
     entryTime: number;
     direction: 'long' | 'short';
     stopLoss: number;
-    atrSeed: number;
+    atrSeedForStop: number;
+    atrSeedForTrail: number;
   } | null = null;
 
   private trailingStopLevel = 0;
@@ -485,23 +486,20 @@ export class MNQDeltaTrendCalculator {
   }
 
   public setPosition(entryPrice: number, direction: 'long' | 'short', atrForTrail?: number): void {
-    // const atrSeed = Math.min(
-    //   (typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal,
-    //   Number(this.config.atrCap ?? 16)
-    // );
+    const liveAtr = (typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal;
+    
+    // Stop uses capped ATR (limits max loss)
+    const atrSeedForStop = this.config.useAtrCap
+      ? Math.min(liveAtr, Number(this.config.atrCap ?? 16))
+      : liveAtr;
+    
+    // Trail uses uncapped ATR (lets winners breathe)
+    const atrSeedForTrail = liveAtr;
 
-        // Added config userAtrCap = true/false
-    const atrSeed = this.config.useAtrCap
-      ? Math.min(
-          (typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal,
-          Number(this.config.atrCap ?? 16)
-        )
-      : (typeof atrForTrail === 'number' && atrForTrail > 0) ? atrForTrail : this.atrAtSignal; 
-
-    const slDist = atrSeed * (this.config.atrStopLossMultiplier ?? 0.75);
+    const slDist = atrSeedForStop * (this.config.atrStopLossMultiplier ?? 0.75);
     const stopLoss = direction === 'long' ? entryPrice - slDist : entryPrice + slDist;
 
-    this.currentPosition = { entryPrice, entryTime: Date.now(), direction, stopLoss, atrSeed };
+    this.currentPosition = { entryPrice, entryTime: Date.now(), direction, stopLoss, atrSeedForStop, atrSeedForTrail };
     this.trailingStopLevel = stopLoss;
     this.trailArmed = false;
     this.noTrailBeforeMs = Date.now() + (this.config.tickExitGraceMs ?? 0);
@@ -513,16 +511,16 @@ export class MNQDeltaTrendCalculator {
 
   public onTickForProtectiveStops(lastPrice: number, _atrNow: number): 'none' | 'hitStop' | 'hitTrail' {
     if (!this.currentPosition || !Number.isFinite(lastPrice)) return 'none';
-    const { direction: dir, entryPrice, stopLoss, atrSeed } = this.currentPosition;
+    const { direction: dir, entryPrice, stopLoss, atrSeedForTrail } = this.currentPosition;
 
     if (dir === 'long' && lastPrice <= stopLoss) return 'hitStop';
     if (dir === 'short' && lastPrice >= stopLoss) return 'hitStop';
 
     if (Date.now() < this.noTrailBeforeMs) return 'none';
-    if (!Number.isFinite(atrSeed) || atrSeed <= 0) return 'none';
+    if (!Number.isFinite(atrSeedForTrail) || atrSeedForTrail <= 0) return 'none';
 
-    const act = atrSeed * (this.config.trailActivationATR ?? 0.125);
-    const off = atrSeed * (this.config.trailOffsetATR ?? 0.125);
+    const act = atrSeedForTrail * (this.config.trailActivationATR ?? 0.125);
+    const off = atrSeedForTrail * (this.config.trailOffsetATR ?? 0.125);
 
     if (dir === 'long') {
       if (!this.trailArmed && (lastPrice - entryPrice) >= act) {

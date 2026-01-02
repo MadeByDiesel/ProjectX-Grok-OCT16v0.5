@@ -398,7 +398,10 @@ export class MNQDeltaTrendTrader {
     this.enteredBarStartMs = barId;
 
     const direction = signal.signal === 'buy' ? 'long' : 'short';
-    const atrSnapshot = Math.min(atrNow, this.config.atrCap ?? 16);
+    // const atrSnapshot = Math.min(atrNow, this.config.atrCap ?? 16);
+    const atrSnapshot = this.config.useAtrCap
+      ? Math.min(atrNow, this.config.atrCap ?? 16)
+      : atrNow;
 
     this.isEnteringPosition = true;
     this.reconciling = true;
