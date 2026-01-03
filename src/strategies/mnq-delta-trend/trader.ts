@@ -447,9 +447,10 @@ export class MNQDeltaTrendTrader {
     const direction = signal.signal === 'buy' ? 'long' : 'short';
     // const atrSnapshot = Math.min(atrNow, this.config.atrCap ?? 16);
 
-    const atrSnapshot = this.config.useAtrCap
-      ? Math.min(atrNow, this.config.atrCap ?? 16)
-      : atrNow;
+    // const atrSnapshot = this.config.useAtrCap
+    //   ? Math.min(atrNow, this.config.atrCap ?? 16)
+    //   : atrNow;
+    const atrSnapshot = atrNow;  // Pass live ATR - calculator handles decoupling
 
     this.isEnteringPosition = true;
     this.reconciling = true;
