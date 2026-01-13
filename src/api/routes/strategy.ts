@@ -210,6 +210,10 @@ router.post('/start', async (req: Request, res: Response) => {
       symbol
     });
 
+    // ADD THESE TWO LINES
+    (global as any).trader = strategy;
+    (global as any).projectXClient = client;
+
     await strategy.start();
     logger.info(`Strategy started for ${symbol} (contractId=${contractId})`);
     res.status(200).json({ success: true, message: 'Strategy started', contractId, symbol });
