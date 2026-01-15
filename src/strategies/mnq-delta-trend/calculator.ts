@@ -325,8 +325,10 @@ export class MNQDeltaTrendCalculator {
     }
 
     const surgeMult = this.config.deltaSurgeMultiplier ?? 1.8;
-    const longThreshold = deltaSMA * surgeMult;
-    const shortThreshold = deltaSMA * -surgeMult;
+    // const longThreshold = deltaSMA * surgeMult;
+    // const shortThreshold = deltaSMA * -surgeMult;
+    const longThreshold = Math.abs(deltaSMA) * surgeMult;
+    const shortThreshold = -Math.abs(deltaSMA) * surgeMult;
 
     const passDeltaLong = delta > spike && delta > longThreshold;
     const passDeltaShort = delta < -spike && delta < shortThreshold;
@@ -433,9 +435,9 @@ export class MNQDeltaTrendCalculator {
     }
 
     const surgeMult = this.config.deltaSurgeMultiplier ?? 1.8;
-    const longThreshold = deltaSMA * surgeMult;
-    const shortThreshold = deltaSMA * -surgeMult;
-
+    const longThreshold = Math.abs(deltaSMA) * surgeMult;
+    const shortThreshold = -Math.abs(deltaSMA) * surgeMult;
+    
     // Restored fade check for intra-bar
     const peakAbs = Math.max(...this.intraBarDeltaHistory.map(e => Math.abs(e.delta)), Math.abs(delta), 0);
     const currAbs = Math.abs(delta);
