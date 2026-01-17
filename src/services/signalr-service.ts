@@ -89,6 +89,20 @@ export class SignalRService {
         this.logger.error('Failed to re-subscribe User Hub after reconnect:', err)
       );
     });
+
+    conn.onclose(async (error) => {
+      this.logger.error('User Hub connection closed permanently', error);
+      const retryConnect = async () => {
+        try {
+          await this.initializeUserHub();
+          this.logger.info('User Hub manually reconnected after close');
+        } catch (err) {
+          this.logger.error('User Hub reconnect failed, retrying in 5s', err);
+          setTimeout(retryConnect, 5000);
+        }
+      };
+      setTimeout(retryConnect, 5000);
+    });
   }
 
   private async subscribeToUserHub(): Promise<void> {
@@ -184,6 +198,22 @@ export class SignalRService {
       } catch (err) {
         this.logger.error('[reconnect] Failed to restore open position', err);
       }
+    });
+
+    conn.onclose(async (error) => {
+      this.logger.error('Market Hub connection closed permanently', error);
+      this.firstQuoteLogged = false;
+      const retryConnect = async () => {
+        try {
+          await this.initializeMarketHub();
+          await this.resubscribeAllContracts();
+          this.logger.info('Market Hub manually reconnected after close');
+        } catch (err) {
+          this.logger.error('Market Hub reconnect failed, retrying in 5s', err);
+          setTimeout(retryConnect, 5000);
+        }
+      };
+      setTimeout(retryConnect, 5000);
     });
   }
 
