@@ -111,10 +111,6 @@ export class MNQDeltaTrendCalculator {
       return { signal: 'hold', reason: 'Warm-up in progress', confidence: 0 };
     }
 
-    if (!this.isInTradingSession(incoming.timestamp)) {
-      return { signal: 'hold', reason: 'Out of session', confidence: 0 };
-    }
-
     const prevClose3m = this.bars3min.length ? this.bars3min[this.bars3min.length - 1].close : NaN;
     const vol = Number.isFinite(incoming.volume as any) ? Number(incoming.volume) : 0;
     const signedVol =
@@ -141,6 +137,10 @@ export class MNQDeltaTrendCalculator {
     marketState.atr = Number.isFinite(atr) ? atr : 0;
     marketState.higherTimeframeTrend = trend;
     marketState.deltaCumulative = (marketState.deltaCumulative ?? 0) + (bar.delta ?? 0);
+
+    if (!this.isInTradingSession(incoming.timestamp)) {
+      return { signal: 'hold', reason: 'Out of session', confidence: 0 };
+    }
 
     const exitSignal = this.checkExitConditions(bar, marketState);
     if (exitSignal) return exitSignal;
