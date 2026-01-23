@@ -20,6 +20,12 @@ export class SignalRService {
   private eventCallbacks: Map<string, Function[]> = new Map();
   private firstQuoteLogged = false;
   private subscribedContracts = new Set<string>();
+  
+  // Reconnection state
+  private isReconnecting = false;
+  private reconnectAttempts = 0;
+  private readonly MAX_RECONNECT_DELAY = 60000; // Cap at 60 seconds
+  private readonly BASE_RECONNECT_DELAY = 5000; // Start at 5 seconds
 
   constructor() {
     this.logger = new Logger('SignalRService');
@@ -31,6 +37,14 @@ export class SignalRService {
 
     await this.initializeUserHub();
     await this.initializeMarketHub();
+  }
+
+  /**
+   * Update JWT token (called by projectx-client after token refresh)
+   */
+  updateToken(newToken: string): void {
+    this.jwtToken = newToken;
+    this.logger.info('JWT token updated for SignalR');
   }
 
   // ========== User Hub ==========
@@ -46,9 +60,9 @@ export class SignalRService {
         skipNegotiation: true,
         transport: signalR.HttpTransportType.WebSockets,
         accessTokenFactory: () => this.jwtToken!,
-        timeout: 10000
+        timeout: 30000
       })
-      .withAutomaticReconnect()
+      .withAutomaticReconnect([0, 2000, 5000, 10000, 30000]) // Quick retries first
       .build();
 
     this.setupUserHubHandlers();
@@ -83,6 +97,10 @@ export class SignalRService {
       this.emit('trade_update', data);
     });
 
+    conn.onreconnecting((error) => {
+      this.logger.warn('User Hub reconnecting...', error?.message);
+    });
+
     conn.onreconnected(() => {
       this.logger.info('User Hub reconnected');
       this.subscribeToUserHub().catch((err) =>
@@ -90,18 +108,10 @@ export class SignalRService {
       );
     });
 
-    conn.onclose(async (error) => {
-      this.logger.error('User Hub connection closed permanently', error);
-      const retryConnect = async () => {
-        try {
-          await this.initializeUserHub();
-          this.logger.info('User Hub manually reconnected after close');
-        } catch (err) {
-          this.logger.error('User Hub reconnect failed, retrying in 5s', err);
-          setTimeout(retryConnect, 5000);
-        }
-      };
-      setTimeout(retryConnect, 5000);
+    // CRITICAL: Handle complete connection loss
+    conn.onclose((error) => {
+      this.logger.error('User Hub connection closed:', error?.message);
+      this.scheduleFullReconnect('user');
     });
   }
 
@@ -132,9 +142,9 @@ export class SignalRService {
         skipNegotiation: true,
         transport: signalR.HttpTransportType.WebSockets,
         accessTokenFactory: () => this.jwtToken!,
-        timeout: 10000
+        timeout: 30000
       })
-      .withAutomaticReconnect()
+      .withAutomaticReconnect([0, 2000, 5000, 10000, 30000]) // Quick retries first
       .build();
 
     this.setupMarketHubHandlers();
@@ -173,55 +183,124 @@ export class SignalRService {
       this.emit('market_depth', { contractId, ...data });
     });
 
-    conn.onreconnected(async () => {
-      this.logger.info('Market Hub reconnected — re-subscribing existing contracts');
-      await this.resubscribeAllContracts();
-
-      // --- Restore open MNQ position after reconnect ---
-      try {
-        const { projectXClient, trader } = global as any; // both already initialized in server.ts
-        if (projectXClient && trader) {
-          const openPositions = await projectXClient.searchOpenPositions();
-          const mnq = openPositions.find((p: any) => p.contractId?.includes('MNQ'));
-          if (mnq) {
-            const side = mnq.side === 1 ? 'short' : 'long';
-            const avgPrice = mnq.avgPrice;
-            const currentATR = trader.calculator.calculateATR();
-            trader.calculator.setPosition(avgPrice, side, currentATR);
-            this.logger.info('[reconnect] Restored open MNQ position', { side, avgPrice });
-          } else {
-            this.logger.info('[reconnect] No open MNQ positions to restore');
-          }
-        } else {
-          this.logger.warn('[reconnect] Trader or ProjectX client not available in global scope');
-        }
-      } catch (err) {
-        this.logger.error('[reconnect] Failed to restore open position', err);
-      }
+    conn.onreconnecting((error) => {
+      this.logger.warn('Market Hub reconnecting...', error?.message);
     });
 
-    conn.onclose(async (error) => {
-      this.logger.error('Market Hub connection closed permanently', error);
-      this.firstQuoteLogged = false;
-      const retryConnect = async () => {
-        try {
-          await this.initializeMarketHub();
-          await this.resubscribeAllContracts();
-          this.logger.info('Market Hub manually reconnected after close');
-        } catch (err) {
-          this.logger.error('Market Hub reconnect failed, retrying in 5s', err);
-          setTimeout(retryConnect, 5000);
-        }
-      };
-      setTimeout(retryConnect, 5000);
+    conn.onreconnected(async () => {
+      this.logger.info('Market Hub reconnected — re-subscribing existing contracts');
+      this.reconnectAttempts = 0; // Reset on successful reconnect
+      await this.resubscribeAllContracts();
+      await this.restoreOpenPosition();
+    });
+
+    // CRITICAL: Handle complete connection loss (after maintenance)
+    conn.onclose((error) => {
+      this.logger.error('Market Hub connection closed:', error?.message);
+      this.scheduleFullReconnect('market');
     });
   }
 
-  // ========== Subscriptions ==========
   /**
-   * Batch subscribe to quotes + trades for multiple contracts.
-   * Tracks subscriptions for reconnect.
+   * Schedule a full reconnect with exponential backoff.
+   * This is called when automatic reconnect fails completely.
    */
+  private scheduleFullReconnect(hub: 'user' | 'market'): void {
+    if (this.isReconnecting) {
+      this.logger.info(`Full reconnect already in progress, skipping ${hub} hub`);
+      return;
+    }
+
+    this.isReconnecting = true;
+    this.reconnectAttempts++;
+    
+    // Exponential backoff with cap
+    const delay = Math.min(
+      this.BASE_RECONNECT_DELAY * Math.pow(1.5, this.reconnectAttempts - 1),
+      this.MAX_RECONNECT_DELAY
+    );
+
+    this.logger.info(`Scheduling full reconnect in ${delay / 1000}s (attempt ${this.reconnectAttempts})`);
+
+    setTimeout(async () => {
+      await this.performFullReconnect();
+    }, delay);
+  }
+
+  /**
+   * Perform a complete reconnection - destroy old connections and rebuild fresh.
+   */
+  private async performFullReconnect(): Promise<void> {
+    this.logger.info('Performing full SignalR reconnect...');
+
+    try {
+      // Stop existing connections (ignore errors - they may already be dead)
+      try {
+        if (this.userHubConnection) {
+          await this.userHubConnection.stop();
+        }
+      } catch (e) { /* ignore */ }
+
+      try {
+        if (this.marketHubConnection) {
+          await this.marketHubConnection.stop();
+        }
+      } catch (e) { /* ignore */ }
+
+      // Null out old connections
+      this.userHubConnection = null;
+      this.marketHubConnection = null;
+
+      // Rebuild fresh connections
+      await this.initializeUserHub();
+      await this.initializeMarketHub();
+
+      // Re-subscribe to all contracts
+      await this.resubscribeAllContracts();
+
+      // Restore open position
+      await this.restoreOpenPosition();
+
+      this.logger.info('Full SignalR reconnect successful');
+      this.reconnectAttempts = 0;
+      this.isReconnecting = false;
+
+    } catch (error) {
+      this.logger.error('Full reconnect failed:', error);
+      this.isReconnecting = false;
+      
+      // Schedule another attempt
+      this.scheduleFullReconnect('market');
+    }
+  }
+
+  /**
+   * Restore open MNQ position after reconnect
+   */
+  private async restoreOpenPosition(): Promise<void> {
+    try {
+      const { projectXClient, trader } = global as any;
+      if (projectXClient && trader) {
+        const openPositions = await projectXClient.searchOpenPositions();
+        const mnq = openPositions.find((p: any) => p.contractId?.includes('MNQ'));
+        if (mnq) {
+          const side = mnq.side === 1 ? 'short' : 'long';
+          const avgPrice = mnq.avgPrice;
+          const currentATR = trader.calculator.calculateATR();
+          trader.calculator.setPosition(avgPrice, side, currentATR);
+          this.logger.info('[reconnect] Restored open MNQ position', { side, avgPrice });
+        } else {
+          this.logger.info('[reconnect] No open MNQ positions to restore');
+        }
+      } else {
+        this.logger.warn('[reconnect] Trader or ProjectX client not available in global scope');
+      }
+    } catch (err) {
+      this.logger.error('[reconnect] Failed to restore open position', err);
+    }
+  }
+
+  // ========== Subscriptions ==========
   async subscribeToContracts(contractIds: string[]): Promise<void> {
     const conn = this.marketHubConnection;
     if (!conn || contractIds.length === 0) return;
@@ -238,9 +317,6 @@ export class SignalRService {
     }
   }
 
-  /**
-   * Backward-compatible single-contract subscribe. (Used by projectx-client)
-   */
   async subscribeToMarketData(contractId: string): Promise<void> {
     return this.subscribeToContracts([contractId]);
   }
@@ -295,6 +371,8 @@ export class SignalRService {
 
   // ========== Lifecycle ==========
   async disconnect(): Promise<void> {
+    this.isReconnecting = false; // Prevent reconnect attempts during shutdown
+    
     if (this.userHubConnection) {
       await this.userHubConnection.stop();
     }
@@ -309,5 +387,12 @@ export class SignalRService {
       this.userHubConnection?.state === signalR.HubConnectionState.Connected &&
       this.marketHubConnection?.state === signalR.HubConnectionState.Connected
     );
+  }
+
+  getConnectionState(): { user: string; market: string } {
+    return {
+      user: this.userHubConnection?.state ?? 'null',
+      market: this.marketHubConnection?.state ?? 'null'
+    };
   }
 }
