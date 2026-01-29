@@ -1,3 +1,4 @@
+// reverted to Nov3 code with added withTokenRefresh() method
 import { ApiService } from './api.service';
 import { SignalRService } from './signalr-service';
 import { 
@@ -23,7 +24,7 @@ export class ProjectXClient {
   private isInitialized: boolean = false;
   private selectedAccountId: number | null = null;
   private _posCache = new Map<string, { ts: number; net: number }>();
-  private _posTtlMs = 3000; // cache position for 3 seconds to avoid 429s
+  private _posTtlMs = 3000;
 
   constructor(config: ProjectXConfig) {
     this.config = config;
@@ -32,7 +33,8 @@ export class ProjectXClient {
   }
 
   /**
-   * Wrap API calls with automatic token refresh on 401
+   * Wrap API calls with automatic token refresh on 401.
+   * ONLY re-authenticates - never touches isInitialized or selectedAccountId.
    */
   private async withTokenRefresh<T>(apiCall: () => Promise<T>): Promise<T> {
     try {
@@ -42,11 +44,16 @@ export class ProjectXClient {
       if (msg.includes('401') || msg.includes('Unauthorized')) {
         console.warn('[ProjectXClient] Token expired, re-authenticating...');
         
-        this.isInitialized = false;
-        await this.initialize();
+        // ONLY re-authenticate - nothing else
+        await this.apiService.authenticate({
+          userName: this.config.userName,
+          apiKey: this.config.apiKey
+        });
         
+        // Update SignalR with fresh token
         const newToken = this.apiService.getAuthToken();
         if (newToken && this.selectedAccountId) {
+          this.signalRService.updateToken(newToken);
           try {
             await this.signalRService.initialize(newToken, this.selectedAccountId);
             console.info('[ProjectXClient] SignalR reinitialized with fresh token');
@@ -55,6 +62,7 @@ export class ProjectXClient {
           }
         }
         
+        // Retry original call
         return await apiCall();
       }
       throw err;
@@ -66,7 +74,6 @@ export class ProjectXClient {
     const live = await this.apiService.searchAccounts({ live: true }).catch(() => ({ accounts: [] }));
     const prac = await this.apiService.searchAccounts({ live: false }).catch(() => ({ accounts: [] }));
 
-    // Do not strip fields — carry full objects forward
     const mergeById = new Map<number, any>();
     for (const a of (live.accounts ?? [])) mergeById.set(a.id, a);
     for (const a of (prac.accounts ?? [])) mergeById.set(a.id, a);
@@ -76,10 +83,9 @@ export class ProjectXClient {
 
   private isTradableAccount(a: any): boolean {
     if (!a) return false;
-    return a.canTrade === true;  // only trust the canonical flag
+    return a.canTrade === true;
   }
 
-  // Make sure we have a selected account and it’s tradable
   private async ensureActiveAccount(): Promise<void> {
     await this.initialize();
     if (this.selectedAccountId == null) {
@@ -89,7 +95,6 @@ export class ProjectXClient {
     const all = await this.fetchAllAccountsMerged();
     const acct = all.find(a => a.id === this.selectedAccountId);
 
-    // Emit a precise verification log with all relevant flags
     console.info('[account:verify]', acct ? {
       id: acct.id,
       number: acct.accountNumber ?? acct.number ?? acct.name,
@@ -113,13 +118,11 @@ export class ProjectXClient {
 
   async initialize(): Promise<void> {
     if (!this.isInitialized) {
-      // Use CORRECT authentication parameters
       await this.apiService.authenticate({
         userName: this.config.userName,
         apiKey: this.config.apiKey
       });
       
-      // Get account ID for SignalR subscription
       const accountsResponse = await this.apiService.searchAccounts({ live: true });
       if (accountsResponse.accounts.length > 0) {
         this.selectedAccountId = accountsResponse.accounts[0].id;
@@ -129,13 +132,6 @@ export class ProjectXClient {
     }
   }
 
-  // Account methods
-
-  // async getAccounts(): Promise<Account[]> {
-  //   await this.initialize();
-  //   const response = await this.apiService.searchAccounts({ live: true });
-  //   return response.accounts;
-  // }
   async getAccounts(): Promise<Account[]> {
     await this.initialize();
     const response = await this.withTokenRefresh(() =>
@@ -143,12 +139,6 @@ export class ProjectXClient {
     );
     return response.accounts;
   }
-
-  // async getAccount(accountId: string): Promise<Account> {
-  //   await this.initialize();
-  //   const response = await this.apiService.searchAccounts({ accountNumber: accountId, live: true });
-  //   return response.accounts[0];
-  // }
 
   async getAccount(accountId: string): Promise<Account> {
     await this.initialize();
@@ -158,19 +148,10 @@ export class ProjectXClient {
     return response.accounts[0];
   }
 
-  // Market Data methods
   async getMarketData(symbol: string): Promise<MarketData> {
     throw new Error('getMarketData not implemented - use SignalR for real-time data');
   }
 
-  // async searchContracts(symbol: string): Promise<Contract[]> {
-  //   await this.initialize();
-  //   const response = await this.apiService.searchContracts({ 
-  //     searchText: symbol, 
-  //     live: false  // ← Contract search requires live: false
-  //   });
-  //   return response.contracts;
-  // }
   async searchContracts(symbol: string): Promise<Contract[]> {
     await this.initialize();
     const response = await this.withTokenRefresh(() =>
@@ -182,7 +163,6 @@ export class ProjectXClient {
     return response.contracts;
   }
 
-
   async getQuotes(contractIds: string[]): Promise<Quote[]> {
     throw new Error('getQuotes not implemented - use SignalR for real-time quotes');
   }
@@ -190,17 +170,15 @@ export class ProjectXClient {
   async getBars(contractId: string, timeframe: string, limit: number = 100): Promise<BarData[]> {
     await this.initialize();
     
-    // Convert timeframe to unit and unitNumber
-    const unit = 1; // Always minutes
-    const unitNumber = parseInt(timeframe); // 15, 30, 60, etc.
+    const unit = 1;
+    const unitNumber = parseInt(timeframe);
     
-    // Calculate default time range (last 24 hours)
     const endTime = new Date();
-    const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000); // 24 hours ago
+    const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000);
 
     const request = {
       contractId,
-      live: false, // ← CRITICAL: Historical data requires live: false
+      live: false,
       startTime: startTime.toISOString(),
       endTime: endTime.toISOString(),
       unit: unit,
@@ -209,17 +187,11 @@ export class ProjectXClient {
       includePartialBar: false
     };
 
-    // const response = await this.apiService.retrieveBars(request);
     const response = await this.withTokenRefresh(() =>
       this.apiService.retrieveBars(request)
     );
     return response.bars;
   }
-
-  // async getContract(contractId: string): Promise<Contract> {
-  //   await this.initialize();
-  //   return await this.apiService.searchContractById({ contractId });
-  // }
 
   async getContract(contractId: string): Promise<Contract> {
     await this.initialize();
@@ -227,18 +199,6 @@ export class ProjectXClient {
       this.apiService.searchContractById({ contractId })
     );
   }
-  
-  // Order methods
-  // async getOrders(): Promise<Order[]> {
-  //   await this.initialize();
-  //   if (!this.selectedAccountId) throw new Error('No account selected');
-    
-  //   const response = await this.apiService.searchOrders({ 
-  //     accountId: this.selectedAccountId 
-  //   });
-  //   if (!response.success) throw new Error(response.errorMessage);
-  //   return response.orders;
-  // }
 
   async getOrders(): Promise<Order[]> {
     await this.initialize();
@@ -251,32 +211,10 @@ export class ProjectXClient {
     return response.orders;
   }
 
-  // async createOrder(orderRequest: {
-  //   contractId: string;
-  //   type: number;
-  //   side: number;
-  //   size: number;
-  //   limitPrice?: number;
-  //   stopPrice?: number;
-  //   trailPrice?: number;
-  //   customTag?: string;
-  //   linkedOrderId?: number;
-  // }): Promise<number> {
-  //   await this.initialize();
-  //   if (!this.selectedAccountId) throw new Error('No account selected');
-    
-  //   const response = await this.apiService.placeOrder({
-  //     accountId: this.selectedAccountId,
-  //     ...orderRequest
-  //   });
-  //   if (!response.success) throw new Error(response.errorMessage);
-  //   return response.orderId;
-  // }
-
   async createOrder(orderRequest: {
     contractId: string;
-    type: number;   // 1=Limit, 2=Market, 4=Stop, 5=TrailingStop, 6=JoinBid, 7=JoinAsk
-    side: number;   // 0=Bid(Buy), 1=Ask(Sell)
+    type: number;
+    side: number;
     size: number;
     limitPrice?: number;
     stopPrice?: number;
@@ -288,40 +226,24 @@ export class ProjectXClient {
 
     await this.ensureActiveAccount();
 
-    // ✅ Strict side (only 0/1 accepted)
     const side = orderRequest.side === 0 ? 0 : 1;
 
-
-    // ✅ For Market=2, do NOT send limit/stop/trail prices
     const payload: any = {
       accountId: this.selectedAccountId,
       contractId: orderRequest.contractId,
-      type: 2,          // force Market
+      type: 2,
       side,
       size: orderRequest.size,
     };
 
     console.log('[order->broker]', payload);
 
-    // const response = await this.apiService.placeOrder(payload);
     const response = await this.withTokenRefresh(() =>
       this.apiService.placeOrder(payload)
     );
-
     if (!response.success) throw new Error(response.errorMessage);
     return response.orderId;
   }
-
-  // async cancelOrder(orderId: number): Promise<void> {
-  //   await this.initialize();
-  //   if (!this.selectedAccountId) throw new Error('No account selected');
-    
-  //   const response = await this.apiService.cancelOrder({
-  //     accountId: this.selectedAccountId,
-  //     orderId
-  //   });
-  //   if (!response.success) throw new Error(response.errorMessage);
-  // }
 
   async cancelOrder(orderId: number): Promise<void> {
     await this.initialize();
@@ -336,17 +258,6 @@ export class ProjectXClient {
     if (!response.success) throw new Error(response.errorMessage);
   }
 
-  // Position methods
-  // async getPositions(): Promise<Position[]> {
-  //   await this.initialize();
-  //   if (!this.selectedAccountId) throw new Error('No account selected');
-    
-  //   const response = await this.apiService.searchOpenPositions({ 
-  //     accountId: this.selectedAccountId 
-  //   });
-  //   if (!response.success) throw new Error(response.errorMessage);
-  //   return response.positions;
-  // }
   async getPositions(): Promise<Position[]> {
     await this.initialize();
     if (!this.selectedAccountId) throw new Error('No account selected');
@@ -358,17 +269,6 @@ export class ProjectXClient {
     return response.positions;
   }
 
-  // async closePosition(contractId: string): Promise<void> {
-  //   await this.initialize();
-  //   if (!this.selectedAccountId) throw new Error('No account selected');
-    
-  //   const response = await this.apiService.closePosition({
-  //     accountId: this.selectedAccountId,
-  //     contractId
-  //   });
-  //   if (!response.success) throw new Error(response.errorMessage);
-  // }
-  
   async closePosition(contractId: string): Promise<void> {
     await this.initialize();
     if (!this.selectedAccountId) throw new Error('No account selected');
@@ -387,11 +287,6 @@ export class ProjectXClient {
     if (!this.selectedAccountId) throw new Error('No account selected');
     if (!Number.isFinite(size) || size <= 0) throw new Error('partialClosePosition: size must be > 0');
 
-    // const response = await this.apiService.partialClosePosition({
-    //   accountId: this.selectedAccountId,
-    //   contractId,
-    //   size: Math.floor(size)
-    // });
     const response = await this.withTokenRefresh(() =>
       this.apiService.partialClosePosition({
         accountId: this.selectedAccountId!,
@@ -402,26 +297,18 @@ export class ProjectXClient {
     if (!response.success) throw new Error(response.errorMessage);
   }
 
-  /**
-   * Fetch the current OPEN net position size for a given contract.
-   * Returns positive for long, negative for short, 0 if flat.
-   * Uses a permissive 'any' read to accommodate Topstep schema variations.
-   */
   async getNetPositionSize(contractId: string): Promise<number> {
     await this.initialize();
     if (!this.selectedAccountId) throw new Error('No account selected');
 
-    // const resp = await this.apiService.searchOpenPositions({ accountId: this.selectedAccountId });
     const resp = await this.withTokenRefresh(() =>
       this.apiService.searchOpenPositions({ accountId: this.selectedAccountId! })
     );
-
     if (!resp.success) throw new Error(resp.errorMessage);
 
     const pos = resp.positions.find(p => (p as any).contractId === contractId) as any | undefined;
     if (!pos) return 0;
 
-    // Tolerate different payload shapes
     const netQuantity   = (pos as any).netQuantity;
     const longQuantity  = (pos as any).longQuantity;
     const shortQuantity = (pos as any).shortQuantity;
@@ -444,11 +331,6 @@ export class ProjectXClient {
     return Number(net ?? 0);
   }
 
-  /**
-   * Close EXACTLY 'requestedSize' (clamped to what is actually open).
-   * Uses /api/Position/partialCloseContract under the hood.
-   * Returns the qty closed and remaining absolute qty.
-   */
   async closePositionByQtySafe(contractId: string, requestedSize: number): Promise<{ closed: number; remaining: number }> {
     await this.initialize();
     if (!this.selectedAccountId) throw new Error('No account selected');
@@ -461,12 +343,6 @@ export class ProjectXClient {
     const size = Math.min(Math.floor(requestedSize), netAbs);
     if (size === 0) return { closed: 0, remaining: netAbs };
 
-    // const response = await this.apiService.partialClosePosition({
-    //   accountId: this.selectedAccountId,
-    //   contractId,
-    //   size
-    // });
-
     const response = await this.withTokenRefresh(() =>
       this.apiService.partialClosePosition({
         accountId: this.selectedAccountId!,
@@ -474,16 +350,11 @@ export class ProjectXClient {
         size
       })
     );
-    
     if (!response.success) throw new Error(response.errorMessage);
 
     return { closed: size, remaining: netAbs - size };
   }
 
-  /**
-   * Close ALL currently open qty (without flattening), by quantity.
-   * This does NOT call /closeContract; it uses partial close for the full size.
-   */
   async closeAllQty(contractId: string): Promise<void> {
     const netAbs = Math.abs(await this.getNetPositionSize(contractId));
     if (netAbs > 0) {
@@ -491,7 +362,6 @@ export class ProjectXClient {
     }
   }
 
-  // Utility methods
   async getBalance(): Promise<number> {
     const accounts = await this.getAccounts();
     return accounts[0]?.balance || 0;
@@ -502,7 +372,6 @@ export class ProjectXClient {
     return accounts[0]?.balance || 0;
   }
 
-  // SignalR WebSocket methods
   async connectWebSocket(): Promise<void> {
     if (!this.isInitialized) {
       await this.initialize();
@@ -533,11 +402,14 @@ export class ProjectXClient {
     }
   }
 
-  // Event handlers with SignalR types
   onMarketData(callback: (data: GatewayQuote & { contractId: string }) => void): void {
     this.signalRService.on('market_data', callback);
   }
 
+  onDepth(callback: (data: { contractId: string; timestamp: string; type: number; price: number; volume: number; currentVolume: number }) => void): void {
+    (this.signalRService as any).on('market_depth', callback);
+  }
+  
   onOrderUpdate(callback: (order: GatewayUserOrder) => void): void {
     this.signalRService.on('order_update', callback);
   }
