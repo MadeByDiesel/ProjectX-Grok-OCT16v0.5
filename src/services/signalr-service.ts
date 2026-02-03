@@ -1,4 +1,4 @@
-// reverted to Nov3 code, added updateToken() method
+// reverted to Nov3 code, added updateToken() method, added staleness detection
 import * as signalR from '@microsoft/signalr';
 import { Logger } from '../utils/logger';
 import {
@@ -21,6 +21,11 @@ export class SignalRService {
   private firstQuoteLogged = false;
   private subscribedContracts = new Set<string>();
 
+  // Staleness detection
+  private lastTickTime: number = 0;
+  private heartbeatInterval: NodeJS.Timeout | null = null;
+  private isReconnecting: boolean = false;
+
   constructor() {
     this.logger = new Logger('SignalRService');
   }
@@ -31,6 +36,9 @@ export class SignalRService {
 
     await this.initializeUserHub();
     await this.initializeMarketHub();
+
+    this.lastTickTime = Date.now();
+    this.startHeartbeat();
   }
 
   /**
@@ -39,6 +47,55 @@ export class SignalRService {
   updateToken(newToken: string): void {
     this.jwtToken = newToken;
     this.logger.info('JWT token updated for SignalR');
+  }
+
+  // ========== Staleness Detection ==========
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatInterval = setInterval(() => this.checkStaleness(), 30000);
+    this.logger.info('Staleness heartbeat started');
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+  }
+
+  private isMarketHours(): boolean {
+    const now = new Date();
+    const day = now.getUTCDay();
+    const hour = now.getUTCHours();
+    if (day === 6) return false; // Saturday
+    if (day === 0 && hour < 23) return false; // Sunday before 6pm ET
+    if (day === 5 && hour >= 22) return false; // Friday after 5pm ET
+    if (hour === 22) return false; // Daily maintenance 5-6pm ET
+    return true;
+  }
+
+  private async checkStaleness(): Promise<void> {
+    if (this.isReconnecting || !this.isMarketHours() || this.subscribedContracts.size === 0) return;
+
+    const staleMs = Date.now() - this.lastTickTime;
+    if (staleMs > 60000) {
+      this.logger.warn(`No market data for ${Math.round(staleMs / 1000)}s - forcing reconnect`);
+      this.isReconnecting = true;
+      try {
+        await this.disconnect();
+        if (this.jwtToken && this.selectedAccountId) {
+          await this.initializeUserHub();
+          await this.initializeMarketHub();
+          await this.resubscribeAllContracts();
+          this.lastTickTime = Date.now();
+          this.logger.info('Staleness reconnect completed');
+        }
+      } catch (err) {
+        this.logger.error('Staleness reconnect failed:', err);
+      } finally {
+        this.isReconnecting = false;
+      }
+    }
   }
 
   // ========== User Hub ==========
@@ -150,6 +207,8 @@ export class SignalRService {
     }
 
     conn.on('GatewayQuote', (contractId: string, data: GatewayQuote) => {
+      this.lastTickTime = Date.now();
+
       if (!this.firstQuoteLogged) {
         this.logger.info(
           `First GatewayQuote: contractId=${contractId}, symbol=${(data as any).symbol ?? 'N/A'}, lastPrice=${(data as any).lastPrice}`
@@ -176,10 +235,13 @@ export class SignalRService {
     });
     
     conn.on('GatewayTrade', (contractId: string, data: GatewayTrade) => {
+      this.lastTickTime = Date.now();
       this.emit('market_trade', { contractId, ...data });
     });
 
     conn.on('GatewayDepth', (contractId: string, data: GatewayDepth | GatewayDepth[] | null) => {
+      this.lastTickTime = Date.now();
+
       // Normalize: Topstep may send an array of entries (with nulls)
       if (Array.isArray(data)) {
         for (const entry of data) {
@@ -213,6 +275,7 @@ export class SignalRService {
     conn.onreconnected(async () => {
       this.logger.info('Market Hub reconnected — re-subscribing existing contracts');
       await this.resubscribeAllContracts();
+      this.lastTickTime = Date.now();
 
       // Restore open MNQ position after reconnect
       try {
@@ -311,6 +374,7 @@ export class SignalRService {
 
   // ========== Lifecycle ==========
   async disconnect(): Promise<void> {
+    this.stopHeartbeat();
     if (this.userHubConnection) {
       await this.userHubConnection.stop();
     }
