@@ -1,4 +1,4 @@
-// calculator.ts — Grok version fix of Dec26 claude code
+// calculator.ts — Dec26 Claude - Fixed code with session reset, breakout tolerance, EMA tolerance
 import { BarData, MarketState, StrategyConfig, TradeSignal } from './types';
 import { TechnicalCalculator } from '../../utils/technical';
 
@@ -9,12 +9,12 @@ export class MNQDeltaTrendCalculator {
   private technical: TechnicalCalculator;
 
   // Closed bars storage
-  public bars3min: BarData[] = []; // public for reset
-  public bars15min: BarData[] = []; // public for reset
+  public bars3min: BarData[] = [];
+  public bars15min: BarData[] = [];
   private isWarmUpProcessed = false;
 
   // Position / trailing
-  private currentPosition: {
+private currentPosition: {
     entryPrice: number;
     entryTime: number;
     direction: 'long' | 'short';
@@ -54,6 +54,18 @@ export class MNQDeltaTrendCalculator {
 
   public getConfig(): Readonly<StrategyConfig> {
     return this.config;
+  }
+
+public resetState(): void {
+    // Preserve warmup data (bars3min, bars15min, isWarmUpProcessed) - loaded by strategy.ts
+    this.lastHTFBucketStartMs = null;
+    this.intraBarDeltaHistory = [];
+    this.lastIntraBarSignalTime = 0;
+    this.lastEntryBarTimestamp = null;
+    this.currentPosition = null;
+    this.trailingStopLevel = 0;
+    this.trailArmed = false;
+    this.atrAtSignal = 0;
   }
 
   private isInTradingSession(timestamp: string): boolean {
@@ -145,16 +157,7 @@ export class MNQDeltaTrendCalculator {
     const exitSignal = this.checkExitConditions(bar, marketState);
     if (exitSignal) return exitSignal;
 
-    const signal = this.generateSignal(bar, marketState, { brokeUpCloseTol, brokeDownCloseTol, passLong, passShort });
-
-    // NEW DEBUG LOG (placed right before return)
-    if (signal.signal === 'hold') {
-      console.debug('[BarClose Eval] HOLD reason:', signal.reason, 'delta=', bar.delta, 'barsLen=', this.bars3min.length);
-    } else {
-      console.info('[BarClose Eval] SIGNAL:', signal.signal, 'reason:', signal.reason, 'confidence:', signal.confidence);
-    }
-
-    return signal;
+    return this.generateSignal(bar, marketState, { brokeUpCloseTol, brokeDownCloseTol, passLong, passShort });
   }
 
   private updateHigherTimeframeBars(bar: BarData): void {
@@ -235,6 +238,7 @@ export class MNQDeltaTrendCalculator {
     return px > ema ? 'bullish' : px < ema ? 'bearish' : 'neutral';
   }
 
+  // Breakout tolerance: 0.5% buffer to match Pine's forgiving detection
   private checkBreakoutCloseTol(): { brokeUpCloseTol: boolean; brokeDownCloseTol: boolean } {
     const n = Math.max(1, this.config.breakoutLookbackBars ?? 20);
     if (this.bars3min.length < n + 1) return { brokeUpCloseTol: false, brokeDownCloseTol: false };
@@ -242,21 +246,26 @@ export class MNQDeltaTrendCalculator {
     const lastClose = this.bars3min[this.bars3min.length - 1].close;
     const high = Math.max(...recent.map(b => b.high));
     const low = Math.min(...recent.map(b => b.low));
-    return {
-      brokeUpCloseTol: lastClose > high * 0.995,
-      brokeDownCloseTol: lastClose < low * 1.005
+    // Apply 0.5% tolerance buffer
+    return { 
+      brokeUpCloseTol: lastClose > high * 0.995, 
+      brokeDownCloseTol: lastClose < low * 1.005 
     };
   }
 
-  private checkBreakoutCloseTolForming(forming: BarData): { brokeUpCloseTol: boolean; brokeDownCloseTol: boolean } {
+  // Breakout tolerance for forming bar: same 0.5% buffer
+  private checkBreakoutCloseTolForming(forming: BarData) {
     const n = Math.max(1, this.config.breakoutLookbackBars ?? 20);
-    if (this.bars3min.length < n) return { brokeUpCloseTol: false, brokeDownCloseTol: false };
+    if (this.bars3min.length < n) {
+      return { brokeUpCloseTol: false, brokeDownCloseTol: false };
+    }
     const window = this.bars3min.slice(-n);
     const hi = Math.max(...window.map(b => b.high));
     const lo = Math.min(...window.map(b => b.low));
-    return {
-      brokeUpCloseTol: forming.close > hi * 0.995,
-      brokeDownCloseTol: forming.close < lo * 1.005
+    // Apply 0.5% tolerance buffer
+    return { 
+      brokeUpCloseTol: forming.close > hi * 0.995, 
+      brokeDownCloseTol: forming.close < lo * 1.005 
     };
   }
 
@@ -293,7 +302,8 @@ export class MNQDeltaTrendCalculator {
     gates: { brokeUpCloseTol: boolean; brokeDownCloseTol: boolean; passLong: boolean; passShort: boolean }
   ): TradeSignal {
     const { brokeUpCloseTol, brokeDownCloseTol, passLong, passShort } = gates;
-
+    console.debug(`[signal][bar] Δ=${bar.delta} HTF=${marketState.higherTimeframeTrend} breakUp=${brokeUpCloseTol} breakDn=${brokeDownCloseTol} emaL=${passLong} emaS=${passShort} ATR=${marketState.atr?.toFixed(2)}`);
+    
     if (this.lastEntryBarTimestamp === bar.timestamp) {
       return { signal: 'hold', reason: 'Same bar re-entry blocked', confidence: 0 };
     }
@@ -306,7 +316,6 @@ export class MNQDeltaTrendCalculator {
 
     const spike = this.config.deltaSpikeThreshold ?? 450;
     const delta = bar.delta ?? 0;
-    const absDelta = Math.abs(delta);
     const len = Math.max(1, this.config.deltaSMALength ?? 20);
     const deltaSMA = this.smaSignedDelta(len, this.bars3min.length - 1);
     if (!Number.isFinite(deltaSMA)) {
@@ -400,13 +409,6 @@ export class MNQDeltaTrendCalculator {
 
     const signal = this.generateSignalForFormingBar(formingBar, marketState, { brokeUpCloseTol, brokeDownCloseTol, passLong, passShort });
 
-    // NEW DEBUG LOG
-    if (signal.signal === 'hold') {
-      console.debug('[Intra Eval] HOLD reason:', signal.reason, 'delta=', formingBar.delta, 'historyLen=', this.intraBarDeltaHistory.length);
-    } else {
-      console.info('[Intra Eval] SIGNAL:', signal.signal, 'reason:', signal.reason, 'confidence:', signal.confidence);
-    }
-
     if (signal.signal !== 'hold') {
       this.lastIntraBarSignalTime = nowMs;
     }
@@ -420,6 +422,7 @@ export class MNQDeltaTrendCalculator {
     gates: { brokeUpCloseTol: boolean; brokeDownCloseTol: boolean; passLong: boolean; passShort: boolean }
   ): TradeSignal {
     const { brokeUpCloseTol, brokeDownCloseTol, passLong, passShort } = gates;
+    console.debug(`[signal][intra] Δ=${formingBar.delta} HTF=${marketState.higherTimeframeTrend} breakUp=${brokeUpCloseTol} breakDn=${brokeDownCloseTol} emaL=${passLong} emaS=${passShort} ATR=${marketState.atr?.toFixed(2)}`);
     const atr = marketState.atr;
     const atrThreshold = this.config.minAtrToTrade ?? 0;
     if (!(Number.isFinite(atr) && atr > atrThreshold)) {
@@ -437,8 +440,8 @@ export class MNQDeltaTrendCalculator {
     const surgeMult = this.config.deltaSurgeMultiplier ?? 1.8;
     const longThreshold = Math.abs(deltaSMA) * surgeMult;
     const shortThreshold = -Math.abs(deltaSMA) * surgeMult;
-    
-    // Restored fade check for intra-bar
+
+    // Restored fade check for intra-bar - includes current delta in peakAbs
     const peakAbs = Math.max(...this.intraBarDeltaHistory.map(e => Math.abs(e.delta)), Math.abs(delta), 0);
     const currAbs = Math.abs(delta);
     const fadeOk = peakAbs === 0 || currAbs >= peakAbs * (this.config.deltaFadeRatio ?? 0.7);
@@ -498,7 +501,11 @@ export class MNQDeltaTrendCalculator {
     // Trail uses uncapped ATR (lets winners breathe)
     const atrSeedForTrail = liveAtr;
 
-    const slDist = atrSeedForStop * (this.config.atrStopLossMultiplier ?? 0.75);
+    // const slDist = atrSeedForStop * (this.config.atrStopLossMultiplier ?? 0.75);
+    const slDist = this.config.useAtrCap
+      ? Math.min(liveAtr * (this.config.atrStopLossMultiplier ?? 0.75), Number(this.config.atrCap ?? 16))
+      : liveAtr * (this.config.atrStopLossMultiplier ?? 0.75);
+    
     const stopLoss = direction === 'long' ? entryPrice - slDist : entryPrice + slDist;
 
     this.currentPosition = { entryPrice, entryTime: Date.now(), direction, stopLoss, atrSeedForStop, atrSeedForTrail };
@@ -559,17 +566,5 @@ export class MNQDeltaTrendCalculator {
 
   public getWarmUpStatus() {
     return { isComplete: this.isWarmUpProcessed, bars3min: this.bars3min.length, bars15min: this.bars15min.length };
-  }
-
-  // Reset method called from trader.start()
-  public resetState(): void {
-    this.lastHTFBucketStartMs = null;
-    this.intraBarDeltaHistory = [];
-    this.lastIntraBarSignalTime = 0;
-    this.lastEntryBarTimestamp = null;
-    this.currentPosition = null;
-    this.trailingStopLevel = 0;
-    this.trailArmed = false;
-    this.atrAtSignal = 0;
   }
 }
